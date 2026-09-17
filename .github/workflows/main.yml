@@ -1,0 +1,49 @@
+name: Deploy Laravel to Directadmin
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  web-deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the latest code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install PHP dependencies
+        run: composer install --no-interaction --prefer-dist --optimize-autoloader
+
+      - name: Build Assets (Vite/Mix)
+        run: |
+           npm install
+           npm run build # Pastikan folder public/build tercipta
+
+      - name: Sync files via SSH/SCP
+        uses: appleboy/scp-action@v1.0.0
+        with:
+           host: ${{ secrets.FTP_SERVER }}
+           username: ${{ secrets.FTP_USERNAME }}
+           password: ${{ secrets.FTP_PASSWORD }}
+           port: 22
+
+           source: "."
+           exclude: |
+              .git
+              .github
+              node_modules
+              tests
+              .env
+              phpunit.xml
+              .editorconfig
+              package-lock.json
+              package.json
+              vite.config.js
+           target: "/home/katalogb/domains/warehub-v2.katalogbisnis.my.id/public_html"
