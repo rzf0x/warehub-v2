@@ -1,5 +1,5 @@
 <script lang="ts">
-    import AdminLayout from '@/Layouts/AdminLayout.svelte';
+    import AdminLayout from '@/layouts/AdminLayout.svelte';
     import { Link } from '@inertiajs/svelte';
     import { Calculator, ArrowLeft, Store } from '@lucide/svelte';
 

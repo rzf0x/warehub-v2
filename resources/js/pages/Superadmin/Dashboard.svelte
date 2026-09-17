@@ -1,6 +1,6 @@
 <script lang="ts">
-    import AdminLayout from '@/Layouts/AdminLayout.svelte';
-    import Badge from '@/Components/Badge.svelte';
+    import AdminLayout from '@/layouts/AdminLayout.svelte';
+    import Badge from '@/components/Badge.svelte';
     import { router } from '@inertiajs/svelte';
     import {
         Calendar,

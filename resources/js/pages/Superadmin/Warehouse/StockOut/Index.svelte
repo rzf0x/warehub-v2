@@ -1,7 +1,7 @@
 <script lang="ts">
-    import AdminLayout from '@/Layouts/AdminLayout.svelte';
-    import ConfirmDialog from '@/Components/ConfirmDialog.svelte';
-    import Pagination from '@/Components/Pagination.svelte';
+    import AdminLayout from '@/layouts/AdminLayout.svelte';
+    import ConfirmDialog from '@/components/ConfirmDialog.svelte';
+    import Pagination from '@/components/Pagination.svelte';
     import { router, Link } from '@inertiajs/svelte';
     import { 
         ArrowUpRight, Search, Plus, Trash2, Printer, BarChart3, Calculator, 

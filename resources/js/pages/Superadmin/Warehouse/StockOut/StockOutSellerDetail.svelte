@@ -1,6 +1,6 @@
 <script lang="ts">
-    import AdminLayout from '@/Layouts/AdminLayout.svelte';
-    import Pagination from '@/Components/Pagination.svelte';
+    import AdminLayout from '@/layouts/AdminLayout.svelte';
+    import Pagination from '@/components/Pagination.svelte';
     import { Link } from '@inertiajs/svelte';
     import { ArrowLeft, User, Package } from '@lucide/svelte';
 

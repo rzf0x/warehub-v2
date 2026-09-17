@@ -1,8 +1,8 @@
 <script lang="ts">
-    import AdminLayout from '@/Layouts/AdminLayout.svelte';
-    import Modal from '@/Components/Modal.svelte';
-    import ConfirmDialog from '@/Components/ConfirmDialog.svelte';
-    import Pagination from '@/Components/Pagination.svelte';
+    import AdminLayout from '@/layouts/AdminLayout.svelte';
+    import Modal from '@/components/Modal.svelte';
+    import ConfirmDialog from '@/components/ConfirmDialog.svelte';
+    import Pagination from '@/components/Pagination.svelte';
     import { router } from '@inertiajs/svelte';
     import { Building2, Search, Plus, Edit2, Trash2 } from '@lucide/svelte';
 

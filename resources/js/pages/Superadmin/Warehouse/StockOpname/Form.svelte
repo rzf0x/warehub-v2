@@ -1,5 +1,5 @@
 <script lang="ts">
-    import AdminLayout from '@/Layouts/AdminLayout.svelte';
+    import AdminLayout from '@/layouts/AdminLayout.svelte';
     import { router, Link } from '@inertiajs/svelte';
     import { ClipboardCheck, Plus, Trash2, ArrowLeft, Save } from '@lucide/svelte';
 

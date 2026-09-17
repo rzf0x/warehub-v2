@@ -1,5 +1,5 @@
 import { createInertiaApp } from '@inertiajs/svelte';
-import AdminLayout from '@/Layouts/AdminLayout.svelte';
+import AdminLayout from '@/layouts/AdminLayout.svelte';
 import AppLayout from '@/layouts/AppLayout.svelte';
 import AuthLayout from '@/layouts/AuthLayout.svelte';
 import SettingsLayout from '@/layouts/settings/Layout.svelte';

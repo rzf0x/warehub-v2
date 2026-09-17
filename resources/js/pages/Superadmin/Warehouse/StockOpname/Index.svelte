@@ -1,7 +1,7 @@
 <script lang="ts">
-    import AdminLayout from '@/Layouts/AdminLayout.svelte';
-    import Pagination from '@/Components/Pagination.svelte';
-    import Badge from '@/Components/Badge.svelte';
+    import AdminLayout from '@/layouts/AdminLayout.svelte';
+    import Pagination from '@/components/Pagination.svelte';
+    import Badge from '@/components/Badge.svelte';
     import { router, Link } from '@inertiajs/svelte';
     import { ClipboardCheck, Search, Plus, FileText, CheckCircle2, AlertTriangle } from '@lucide/svelte';
 
