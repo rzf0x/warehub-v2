@@ -15,121 +15,200 @@ class CleaningDataShopeeController extends Controller
 
     public function process(Request $request)
     {
+        ini_set('memory_limit', '512M');
+        set_time_limit(120);
+
         $request->validate([
-            'master_json' => 'nullable|string',
+            'master_json' => 'nullable',
             'raw_jsons' => 'nullable|array',
         ]);
 
-        $masterRaw = json_decode($request->input('master_json', '[]'), true) ?? [];
-        $rawJsons = $request->input('raw_jsons', []);
-
-        $masterData = $this->unwrapDataArray($masterRaw, ['Income', 'orders', 'data', 'items', 'rows']);
-
-        $masterOrders = [];
-        $totalMasterAmount = 0;
-
-        foreach ($masterData as $row) {
-            if (!is_array($row)) continue;
-            $orderId = null;
-            $amount = 0;
-
-            foreach ($row as $k => $v) {
-                if (is_array($v)) continue;
-                $vStr = trim((string)$v);
-                if (preg_match('/^[0-9A-Z]{14,16}$/i', $vStr) && !is_numeric($vStr)) {
-                    $orderId = $vStr;
-                }
-                if (in_array(strtolower($k), ['total penghasilan', 'column33', 'jumlah pencairan', 'pencairan', 'total_pembayaran', 'total no. pesanan', 'amount'])) {
-                    $val = str_replace(['Rp', '.', ' '], '', $vStr);
-                    $val = str_replace(',', '.', $val);
-                    if (is_numeric($val)) {
-                        $amount = floatval($val);
-                    }
-                }
+        $masterRaw = $request->input('master_json');
+        if (is_string($masterRaw) && trim($masterRaw) !== '') {
+            $decodedMaster = json_decode($masterRaw, true);
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Master JSON tidak valid: ' . json_last_error_msg()
+                ], 422);
             }
+            $masterRaw = $decodedMaster;
+        }
 
-            if ($orderId) {
-                if (!isset($masterOrders[$orderId])) {
-                    $masterOrders[$orderId] = $amount;
-                    $totalMasterAmount += $amount;
+        $rawInputs = $request->input('raw_jsons', []);
+        foreach ($rawInputs as $idx => $rawInput) {
+            if (is_string($rawInput) && trim($rawInput) !== '') {
+                json_decode($rawInput, true);
+                if (json_last_error() !== JSON_ERROR_NONE) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Raw JSON tidak valid (File #' . ($idx + 1) . '): ' . json_last_error_msg()
+                    ], 422);
                 }
             }
         }
 
-        $totalOrderIdsMaster = count($masterOrders);
+        // 1. Ekstraksi Bruto dari Summary Master Data
+        $bruto = $this->extractBruto($masterRaw);
 
-        // Deduplication & Order Matching
-        $dedupKeys = [];
-        $matchedOrdersMap = [];
-        $matchedDataItems = [];
-        $skuBreakdown = [];
-        $totalQtySatuan = 0;
-        $totalPembayaranKalkulasi = 0;
-        $totalQtyProductDitemukan = 0;
+        // 2. Unwrap & Process Master Data
+        $masterRows = $this->unwrapDataArray($masterRaw, ['Income', 'Penghasilan', 'orders', 'data', 'items', 'rows']);
+        
+        $masterMapping = [];
+        $totalMasterAmount = 0;
 
-        foreach ($rawJsons as $rawJsonStr) {
-            $rawPayload = is_array($rawJsonStr) ? $rawJsonStr : (json_decode($rawJsonStr, true) ?? []);
-            $items = $this->unwrapDataArray($rawPayload, ['orders', 'data', 'items', 'rows']);
+        foreach ($masterRows as $row) {
+            if (!is_array($row)) continue;
+            
+            $orderId = $this->extractMasterOrderId($row);
+            if (!$orderId) continue;
+
+            $amt = $this->extractMasterAmount($row);
+
+            if (!isset($masterMapping[$orderId])) {
+                $masterMapping[$orderId] = 0;
+            }
+            $masterMapping[$orderId] += $amt;
+            $totalMasterAmount += $amt;
+        }
+
+        $totalOrderIdsMaster = count($masterMapping);
+
+        // 3. Process Raw Shopee Data
+        $dedupSet = [];
+        $orderRawItemsMap = [];
+
+        foreach ($rawInputs as $rawInput) {
+            $rawPayload = is_string($rawInput) ? (json_decode($rawInput, true) ?? []) : $rawInput;
+            $items = $this->unwrapDataArray($rawPayload, ['data', 'orders', 'items', 'rows']);
             if (!is_array($items)) continue;
 
             foreach ($items as $item) {
                 if (!is_array($item)) continue;
-                $orderId = trim((string)($item['No. Pesanan'] ?? $item['Order ID'] ?? $item['order_id'] ?? ''));
-                $resi = trim((string)($item['No. Resi'] ?? $item['Tracking No'] ?? $item['resi'] ?? '-'));
+
+                $orderId = strtoupper(trim((string)($item['No. Pesanan'] ?? $item['Order ID'] ?? $item['order_id'] ?? '')));
+                if (!$orderId) continue;
+
+                $productName = trim((string)($item['Nama Produk'] ?? $item['product_name'] ?? ''));
+                $variantName = trim((string)($item['Nama Variasi'] ?? $item['variant_name'] ?? ''));
+
+                // De-duplikasi Baris Mentah: No. Pesanan + '||' + Nama Produk + '||' + Nama Variasi
+                $dedupKey = $orderId . '||' . $productName . '||' . $variantName;
+                if (isset($dedupSet[$dedupKey])) continue;
+                $dedupSet[$dedupKey] = true;
+
+                // Cek jika Order ID ditemukan di masterMapping
+                if (!isset($masterMapping[$orderId])) continue;
+
+                if (!isset($orderRawItemsMap[$orderId])) {
+                    $orderRawItemsMap[$orderId] = [];
+                }
+                $orderRawItemsMap[$orderId][] = $item;
+            }
+        }
+
+        $matchedOrdersMap = [];
+        $matchedDataItems = [];
+        $skuBreakdownMap = [];
+
+        $totalPembayaranKalkulasi = 0;
+        $totalQtyProductDitemukan = 0;
+        $totalQtySatuan = 0;
+
+        foreach ($orderRawItemsMap as $orderId => $rawItems) {
+            $masterAmt = $masterMapping[$orderId] ?? 0;
+            $itemCount = count($rawItems);
+
+            // Hitung total raw payment per item untuk rasio pembagian
+            $rawPaySums = 0;
+            $rawPays = [];
+            foreach ($rawItems as $idx => $rawItem) {
+                $rawP = $this->parseNum($rawItem['Total Pembayaran'] ?? $rawItem['Subtotal Pesanan'] ?? 0);
+                $rawPays[$idx] = $rawP;
+                $rawPaySums += max(0, $rawP);
+            }
+
+            // Alokasikan nominal master secara proporsional ke tiap baris item
+            $allocatedPays = [];
+            if ($masterAmt > 0) {
+                $runningAlloc = 0;
+                for ($i = 0; $i < $itemCount; $i++) {
+                    if ($i === $itemCount - 1) {
+                        $alloc = $masterAmt - $runningAlloc;
+                    } else {
+                        if ($rawPaySums > 0) {
+                            $ratio = max(0, $rawPays[$i]) / $rawPaySums;
+                            $alloc = (int)round($masterAmt * $ratio);
+                        } else {
+                            $alloc = (int)round($masterAmt / $itemCount);
+                        }
+                    }
+                    $allocatedPays[$i] = $alloc;
+                    $runningAlloc += $alloc;
+                }
+            } else {
+                foreach ($rawItems as $idx => $rawItem) {
+                    $allocatedPays[$idx] = $rawPays[$idx];
+                }
+            }
+
+            $orderMatchedAny = false;
+
+            foreach ($rawItems as $idx => $item) {
+                $itemPembayaran = $allocatedPays[$idx] ?? 0;
+
+                // STRICT FILTERING: Abaikan baris dengan Total Pembayaran 0 atau minus
+                if ($itemPembayaran <= 0) {
+                    continue;
+                }
+
+                $orderMatchedAny = true;
+
                 $productName = trim((string)($item['Nama Produk'] ?? $item['product_name'] ?? ''));
                 $variantName = trim((string)($item['Nama Variasi'] ?? $item['variant_name'] ?? ''));
                 $sku = trim((string)($item['Nomor Referensi SKU'] ?? $item['SKU Penjual'] ?? $item['SKU Induk'] ?? $item['sku'] ?? 'NO-SKU'));
-                $qty = intval($item['Jumlah'] ?? $item['Qty'] ?? $item['quantity'] ?? 1);
-                
-                $totalPembayaranRaw = $item['Total Pembayaran'] ?? $item['Subtotal Pesanan'] ?? 0;
-                $totalPembayaran = floatval(str_replace(['Rp', '.', ' '], '', (string)$totalPembayaranRaw));
+                $resi = trim((string)($item['No. Resi'] ?? $item['Tracking No'] ?? $item['resi'] ?? '-'));
+                $qty = max(1, intval($item['Jumlah'] ?? $item['Qty'] ?? $item['quantity'] ?? 1));
 
-                if (!$orderId) continue;
+                $matchedDataItems[] = [
+                    'No. Pesanan' => $orderId,
+                    'No. Resi' => $resi,
+                    'Nomor Referensi SKU' => $sku,
+                    'Nama Variasi' => $variantName,
+                    'Jumlah' => $qty,
+                    'Total Pembayaran' => $itemPembayaran,
+                    'Nama Produk' => $productName,
+                ];
 
-                $key = "{$orderId}_{$productName}_{$variantName}";
-                if (isset($dedupKeys[$key])) continue;
-                $dedupKeys[$key] = true;
+                $totalPembayaranKalkulasi += $itemPembayaran;
+                $totalQtyProductDitemukan += $qty;
 
-                if (isset($masterOrders[$orderId])) {
-                    $matchedOrdersMap[$orderId] = $masterOrders[$orderId];
-                    $masterAmount = $masterOrders[$orderId];
-                    $itemPembayaran = $masterAmount > 0 ? $masterAmount : $totalPembayaran;
-                    
-                    $matchedDataItems[] = [
-                        'No. Pesanan' => $orderId,
-                        'No. Resi' => $resi,
-                        'Nomor Referensi SKU' => $sku,
-                        'Nama Variasi' => $variantName,
-                        'Jumlah' => $qty,
-                        'Total Pembayaran' => $itemPembayaran,
-                        'Nama Produk' => $productName
-                    ];
+                // Pemecahan SKU Bundle & Unit Count
+                $unitCount = $this->getUnitCount($sku, $variantName);
+                $effectiveLineQuantity = $qty * $unitCount;
+                $totalQtySatuan += $effectiveLineQuantity;
 
-                    $totalPembayaranKalkulasi += $itemPembayaran;
-                    $totalQtyProductDitemukan += $qty;
+                // Accumulate SKU Breakdown
+                $subCodes = $this->splitBundleSku($sku, $variantName);
+                $size = $this->extractSize($variantName, $sku);
 
-                    // Parse Shopee Bundle
-                    $parsedItems = $this->parseShopeeBundle($sku, $variantName, $qty);
-                    foreach ($parsedItems as $p) {
-                        $itemSku = $p['sku'];
-                        $itemSize = $p['size'];
-                        $itemQty = $p['qty'];
-
-                        $totalQtySatuan += $itemQty;
-                        $bKey = "{$itemSku}_{$itemSize}";
-
-                        if (!isset($skuBreakdown[$bKey])) {
-                            $skuBreakdown[$bKey] = [
-                                'sku' => $itemSku,
-                                'size' => $itemSize,
-                                'total_qty' => 0,
-                                'order_count' => 0
-                            ];
-                        }
-                        $skuBreakdown[$bKey]['total_qty'] += $itemQty;
-                        $skuBreakdown[$bKey]['order_count'] += 1;
+                foreach ($subCodes as $code) {
+                    $bKey = strtoupper($code) . '||' . $size;
+                    if (!isset($skuBreakdownMap[$bKey])) {
+                        $skuBreakdownMap[$bKey] = [
+                            'sku' => $code,
+                            'size' => $size,
+                            'total_qty' => 0,
+                            'order_count' => 0,
+                        ];
                     }
+                    $skuBreakdownMap[$bKey]['total_qty'] += $qty;
+                    $skuBreakdownMap[$bKey]['order_count'] += 1;
                 }
+            }
+
+            if ($orderMatchedAny) {
+                $matchedOrdersMap[$orderId] = $masterAmt;
             }
         }
 
@@ -138,32 +217,39 @@ class CleaningDataShopeeController extends Controller
         $totalDataCocok = count($matchedDataItems);
         $totalProdukDitemukan = $totalDataCocok;
 
+        // Missing Order IDs
         $missingOrderIds = [];
-        foreach ($masterOrders as $orderId => $amt) {
+        foreach ($masterMapping as $orderId => $amt) {
             if (!isset($matchedOrdersMap[$orderId])) {
                 $missingOrderIds[] = [
                     'order_id' => $orderId,
-                    'amount' => $amt
+                    'amount' => $amt,
                 ];
             }
         }
+
+        // Urutkan SKU Breakdown secara descending berdasarkan total_qty
+        $skuBreakdown = array_values($skuBreakdownMap);
+        usort($skuBreakdown, fn($a, $b) => $b['total_qty'] <=> $a['total_qty']);
 
         return response()->json([
             'success' => true,
             'export_payload' => [
                 'total_order_ids_master' => $totalOrderIdsMaster,
-                'total_master_amount' => $totalMasterAmount,
-                'matched_master_amount' => $matchedMasterAmount,
+                'total_master_amount' => round($totalMasterAmount),
+                'matched_master_amount' => round($matchedMasterAmount),
                 'total_data_cocok' => $totalDataCocok,
-                'total_pembayaran_kalkulasi' => $totalPembayaranKalkulasi,
+                'total_pembayaran_kalkulasi' => round($totalPembayaranKalkulasi),
                 'total_produk_ditemukan' => $totalProdukDitemukan,
                 'total_qty_product_ditemukan' => $totalQtyProductDitemukan,
                 'total_qty_satuan' => $totalQtySatuan,
                 'total_pesanan_ditemukan' => $totalPesananDitemukan,
-                'data' => $matchedDataItems
+                'bruto' => round($bruto),
+                'data' => $matchedDataItems,
             ],
-            'sku_breakdown' => array_values($skuBreakdown),
-            'missing_order_ids' => $missingOrderIds
+            'sku_breakdown' => array_slice($skuBreakdown, 0, 150),
+            'sku_breakdown_more' => max(0, count($skuBreakdown) - 150),
+            'missing_order_ids' => $missingOrderIds,
         ]);
     }
 
@@ -181,46 +267,140 @@ class CleaningDataShopeeController extends Controller
         return $payload;
     }
 
-    private function parseShopeeBundle($skuStr, $variationStr, $qty)
+    private function parseNum($val): float
     {
-        $results = [];
-        $cleanSku = trim($skuStr);
-        $cleanVar = trim($variationStr);
+        if ($val === null || $val === '') return 0.0;
+        if (is_numeric($val)) return (float)$val;
+        
+        $s = trim((string)$val);
+        $s = preg_replace('/[Rp\s]/i', '', $s);
+        if ($s === '') return 0.0;
 
-        $size = 'ALL SIZE';
-        if (preg_match('/\b(3XL|2XL|XL|L|M|S|XS|XXL|XXXL)\b/i', $cleanVar . ' ' . $cleanSku, $m)) {
-            $size = strtoupper($m[1]);
-        }
+        // Indonesian format: 150.000,50 -> 150000.50
+        $s = str_replace('.', '', $s);
+        $s = str_replace(',', '.', $s);
+        return is_numeric($s) ? (float)$s : 0.0;
+    }
 
-        $delimiter = null;
-        if (str_contains($cleanSku, '+')) $delimiter = '+';
-        elseif (str_contains($cleanSku, ',')) $delimiter = ',';
-        elseif (preg_match('/^[A-Z0-9]+-[A-Z0-9]+/', $cleanSku)) $delimiter = '-';
+    private function extractMasterOrderId(array $row): ?string
+    {
+        $ORDER_ID_REGEX = '/^[A-Z0-9_\-]{8,25}$/i';
 
-        if ($delimiter) {
-            $parts = explode($delimiter, $cleanSku);
-            $prefix = '';
-            foreach ($parts as $idx => $part) {
-                $part = trim($part);
-                if ($idx === 0 && preg_match('/^([A-Z0-9\s]+)\s+([A-Z0-9]+)$/i', $part, $pm)) {
-                    $prefix = trim($pm[1]);
+        $priorityKeys = ['Dari', 'Column3', 'No. Pesanan', 'Order/Adjustment ID', 'order_id', 'Order ID'];
+        foreach ($priorityKeys as $k) {
+            if (isset($row[$k])) {
+                $val = trim((string)$row[$k]);
+                if (preg_match($ORDER_ID_REGEX, $val)) {
+                    return strtoupper($val);
                 }
-                $itemSku = $part;
-                if ($idx > 0 && $prefix && !str_contains($part, ' ') && !preg_match('/^[A-Z]{2,}/i', $part)) {
-                    $itemSku = $prefix . ' ' . $part;
-                }
-
-                $pQty = $qty;
-                if (preg_match('/x(\d+)/i', $itemSku, $qm)) {
-                    $pQty *= intval($qm[1]);
-                    $itemSku = trim(preg_replace('/x\d+/i', '', $itemSku));
-                }
-                $results[] = ['sku' => $itemSku, 'size' => $size, 'qty' => $pQty];
             }
-        } else {
-            $results[] = ['sku' => $cleanSku, 'size' => $size, 'qty' => $qty];
         }
 
-        return $results;
+        foreach ($row as $k => $v) {
+            if (is_array($v)) continue;
+            $val = trim((string)$v);
+            if (preg_match($ORDER_ID_REGEX, $val) && !is_numeric($val)) {
+                return strtoupper($val);
+            }
+        }
+
+        return null;
+    }
+
+    private function extractMasterAmount(array $row): float
+    {
+        if (array_key_exists('Rincian Jumlah Pelepasan Dana', $row) || array_key_exists('rincian_jumlah_pelepasan_dana', $row)) {
+            $col2 = strtoupper(trim((string)($row['Column2'] ?? $row['column2'] ?? '')));
+            if ($col2 === 'ORDER') {
+                $val = $row['Rincian Jumlah Pelepasan Dana'] ?? $row['rincian_jumlah_pelepasan_dana'];
+                return $this->parseNum($val);
+            }
+            return 0.0;
+        }
+
+        if (array_key_exists('Column33', $row) || array_key_exists('column33', $row)) {
+            return $this->parseNum($row['Column33'] ?? $row['column33']);
+        }
+
+        foreach (['Total Penghasilan', 'total_penghasilan', 'Jumlah Pencairan', 'pencairan', 'Total Pembayaran', 'amount'] as $k) {
+            if (isset($row[$k])) {
+                return $this->parseNum($row[$k]);
+            }
+        }
+
+        return 0.0;
+    }
+
+    private function extractBruto($masterRaw): float
+    {
+        $summary = [];
+        if (is_array($masterRaw)) {
+            if (isset($masterRaw['Summary']) && is_array($masterRaw['Summary'])) {
+                $summary = $masterRaw['Summary'];
+            } elseif (isset($masterRaw['summary']) && is_array($masterRaw['summary'])) {
+                $summary = $masterRaw['summary'];
+            }
+        }
+
+        foreach ($summary as $item) {
+            if (!is_array($item)) continue;
+            $lap = strtolower(trim((string)($item['Laporan Penghasilan'] ?? $item['laporan_penghasilan'] ?? $item['Column1'] ?? '')));
+            if (str_contains($lap, 'total pendapatan') || str_contains($lap, '1. total pendapatan')) {
+                $col4 = $item['Column4'] ?? $item['column4'] ?? 0;
+                return $this->parseNum($col4);
+            }
+        }
+
+        return 0.0;
+    }
+
+    private function extractSize(string $variationStr, string $skuStr): string
+    {
+        $text = trim($variationStr . ' ' . $skuStr);
+        if (preg_match('/(?<![A-Z0-9])(S|M|L|XL|XXL|2XL|3XL|4XL|5XL|XXXL|XXXXL|XXXXXL)(?![A-Z0-9])/i', $text, $m)) {
+            return strtoupper($m[1]);
+        }
+        return '-';
+    }
+
+    private function splitBundleSku(string $skuRaw, string $variationRaw): array
+    {
+        $sku = trim($skuRaw);
+        $variation = trim($variationRaw);
+
+        // 1. Remove bundle prefix marker
+        $sku = preg_replace('/^(SET|PAKET\d*|BDL|BND|BUNDLE)[-\s]+/i', '', $sku);
+
+        // 2. BDL-XXXX -> XXXX
+        if (preg_match('/^BDL-/i', $sku)) {
+            $sku = preg_replace('/^BDL-/i', '', $sku);
+        }
+
+        // 3. Special handling for KAOS POLOS / POLOS variations
+        if (strtoupper($sku) === 'KAOS POLOS' && preg_match('/^polos\s+/i', $variation)) {
+            $variation = preg_replace('/^polos\s+/i', 'POLOS - ', $variation);
+        }
+
+        // 4. POLOS - COLOR pattern
+        if (preg_match_all('/POLOS\s*-\s*[A-Z]+/i', $sku, $matches) && count($matches[0]) > 1) {
+            return array_map('trim', $matches[0]);
+        }
+
+        // 5. Replace delimiters ['/', '&', ',', '|', '+'] with '-'
+        $cleanStr = str_replace(['/', '&', ',', '|', '+'], '-', $sku);
+        $parts = array_values(array_filter(array_map('trim', explode('-', $cleanStr))));
+
+        if (count($parts) > 0) {
+            return $parts;
+        }
+
+        return [$sku !== '' ? $sku : 'NO-SKU'];
+    }
+
+    private function getUnitCount(string $skuRaw, string $variationRaw): int
+    {
+        $codes = $this->splitBundleSku($skuRaw, $variationRaw);
+        return max(1, count($codes));
     }
 }
+
