@@ -526,12 +526,7 @@ class StockOutController extends Controller
                     }
                     continue;
                 } else {
-                    // Record the whole rawSku as missing so user can easily search and edit the JSON
-                    $missingSkus[strtoupper($rawSku)] = [
-                        'sku' => $rawSku,
-                        'product_name' => $productName,
-                        'variation' => $variantName,
-                    ];
+                    $this->recordMissingSku($missingSkus, $rawSku, $productName, $variantName, $qty);
                     continue;
                 }
             }
@@ -557,11 +552,7 @@ class StockOutController extends Controller
             }
 
             // 3. Fallback missing SKU recording
-            $missingSkus[strtoupper($rawSku)] = [
-                'sku' => $rawSku,
-                'product_name' => $productName,
-                'variation' => $variantName,
-            ];
+            $this->recordMissingSku($missingSkus, $rawSku, $productName, $variantName, $qty);
         }
 
         return response()->json([
@@ -576,6 +567,104 @@ class StockOutController extends Controller
     public function importChunked(Request $request)
     {
         return $this->processOrders($request);
+    }
+
+    /**
+     * Extract apparel sizes from variation text, sku, or product name
+     */
+    private function extractSizesFromText(string $varText, string $skuText = ''): array
+    {
+        $combined = $varText . ' ' . $skuText;
+        $sizes = [];
+
+        // 1. Standard apparel letter sizes
+        if (preg_match_all('/\b(5XL|4XL|3XL|2XL|XXXXXL|XXXXL|XXXL|XXL|XL|L|M|S|XS|L\-XL|ML|ALL\s*SIZE|JUMBO|STANDAR)\b/i', $combined, $matches)) {
+            foreach ($matches[1] as $m) {
+                $val = strtoupper(trim(preg_replace('/\s+/', ' ', $m)));
+                if ($val === 'XXL') $val = '2XL';
+                if ($val === 'XXXL') $val = '3XL';
+                if ($val === 'XXXXL') $val = '4XL';
+                if ($val === 'XXXXXL') $val = '5XL';
+                $sizes[] = $val;
+            }
+        }
+
+        // 2. Explicit size/ukuran prefix with number or code (e.g. "Size: 32", "Ukuran 30", "Size M", but ignore "All Size")
+        if (preg_match_all('/(?<!all\s)(?<!plus\s)(?<!big\s)(?<!free\s)\b(?:size|ukuran|sz|no\.?)\s*[:\-]?\s*(\d{1,3}|[A-Za-z0-9]{1,4})\b/i', $varText, $matches)) {
+            foreach ($matches[1] as $m) {
+                $val = strtoupper(trim($m));
+                if (!in_array($val, ['ANAK', 'DEWASA', 'PRIA', 'WANITA', 'COWOK', 'CEWEK', 'BAYI', 'KIDS', 'MAN', 'WOMAN'])) {
+                    $sizes[] = $val;
+                }
+            }
+        }
+
+        // 3. Fallback: only if no sizes found yet, inspect comma/slash separated variation segments
+        if (empty($sizes) && $varText) {
+            $segments = preg_split('/[,\|\/]/', $varText);
+            foreach ($segments as $seg) {
+                $segTrim = trim($seg);
+                if (preg_match('/^(\d{1,3}|[A-Z0-9\-]{1,4})$/i', $segTrim)) {
+                    $sizes[] = strtoupper($segTrim);
+                }
+            }
+        }
+
+        return array_values(array_unique($sizes));
+    }
+
+    /**
+     * Record missing SKU with aggregated sizes, variations, and quantities
+     */
+    private function recordMissingSku(
+        array &$missingSkus,
+        string $rawSku,
+        string $productName,
+        string $variantName,
+        int $qty = 1,
+        ?string $missingPart = null
+    ): void {
+        $skuKey = strtoupper(trim($rawSku));
+        if (!$skuKey) return;
+
+        if (!isset($missingSkus[$skuKey])) {
+            $missingSkus[$skuKey] = [
+                'sku' => $rawSku,
+                'product_name' => $productName ?: $rawSku,
+                'variations' => [],
+                'sizes' => [],
+                'total_qty' => 0,
+                'order_count' => 0,
+                'missing_parts' => [],
+            ];
+        }
+
+        if ($productName && $missingSkus[$skuKey]['product_name'] === $rawSku) {
+            $missingSkus[$skuKey]['product_name'] = $productName;
+        }
+
+        if ($variantName && !in_array($variantName, $missingSkus[$skuKey]['variations'])) {
+            $missingSkus[$skuKey]['variations'][] = $variantName;
+        }
+
+        $detectedSizes = $this->extractSizesFromText($variantName, $rawSku);
+        foreach ($detectedSizes as $sz) {
+            if (!in_array($sz, $missingSkus[$skuKey]['sizes'])) {
+                $missingSkus[$skuKey]['sizes'][] = $sz;
+            }
+        }
+
+        if ($missingPart && !in_array($missingPart, $missingSkus[$skuKey]['missing_parts'])) {
+            $missingSkus[$skuKey]['missing_parts'][] = $missingPart;
+        }
+
+        $missingSkus[$skuKey]['total_qty'] += $qty;
+        $missingSkus[$skuKey]['order_count'] += 1;
+
+        // Legacy compatibility fields
+        $missingSkus[$skuKey]['variation'] = implode(', ', $missingSkus[$skuKey]['variations']);
+        $missingSkus[$skuKey]['sizes_count'] = count($missingSkus[$skuKey]['sizes']);
+        $missingSkus[$skuKey]['has_multiple_sizes'] = count($missingSkus[$skuKey]['sizes']) > 1;
     }
 
     private function parseSizeTokens(string $text): array

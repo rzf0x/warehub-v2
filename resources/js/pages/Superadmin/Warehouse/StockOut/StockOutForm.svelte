@@ -71,7 +71,14 @@
     interface MissingSkuItem {
         sku: string;
         product_name: string;
-        variation: string;
+        variation?: string;
+        variations?: string[];
+        sizes?: string[];
+        sizes_count?: number;
+        has_multiple_sizes?: boolean;
+        total_qty?: number;
+        order_count?: number;
+        missing_parts?: string[];
     }
 
     let {
@@ -427,10 +434,20 @@
     let importMissingCount = $state<number>(0);
     let missingSkusList = $state<MissingSkuItem[]>([]);
 
-    // Missing SKUs copy & search state
+    // Missing SKUs statistics & copy state
+    let missingWithMultipleSizesCount = $derived(
+        missingSkusList.filter(
+            (m) => (m.sizes && m.sizes.length > 1) || m.has_multiple_sizes,
+        ).length,
+    );
+    let totalMissingPcs = $derived(
+        missingSkusList.reduce((acc, m) => acc + (m.total_qty || 1), 0),
+    );
+
     let missingSearchQuery = $state<string>("");
     let isCopiedAllJson = $state<boolean>(false);
     let isCopiedAllSkus = $state<boolean>(false);
+    let isCopiedAllSummary = $state<boolean>(false);
     let copiedRowKey = $state<string | null>(null);
 
     let filteredMissingSkus = $derived(
@@ -438,7 +455,9 @@
             (m) =>
                 !missingSearchQuery.trim() ||
                 (m.sku || "").toLowerCase().includes(missingSearchQuery.toLowerCase()) ||
-                (m.product_name || "").toLowerCase().includes(missingSearchQuery.toLowerCase()),
+                (m.product_name || "").toLowerCase().includes(missingSearchQuery.toLowerCase()) ||
+                (m.sizes || []).some((sz) => sz.toLowerCase().includes(missingSearchQuery.toLowerCase())) ||
+                (m.variation || "").toLowerCase().includes(missingSearchQuery.toLowerCase()),
         ),
     );
 
@@ -467,6 +486,20 @@
         setTimeout(() => (isCopiedAllSkus = false), 2000);
     }
 
+    async function copyAllSummary() {
+        if (missingSkusList.length === 0) return;
+        const text = missingSkusList
+            .map((m, idx) => {
+                const sizesStr = m.sizes && m.sizes.length > 0 ? m.sizes.join(", ") : (m.variation || "-");
+                const multiTag = (m.sizes && m.sizes.length > 1) || m.has_multiple_sizes ? ` [${m.sizes?.length ?? 2} UKURAN]` : "";
+                return `${idx + 1}. SKU: ${m.sku}${multiTag} | Ukuran: [${sizesStr}] | Produk: ${m.product_name || "-"}`;
+            })
+            .join("\n");
+        await navigator.clipboard.writeText(text);
+        isCopiedAllSummary = true;
+        setTimeout(() => (isCopiedAllSummary = false), 2000);
+    }
+
     async function copyJsonLine(sku: string) {
         if (!sku) return;
         const line = formatJsonSkuLine(sku);
@@ -483,6 +516,16 @@
         copiedRowKey = sku + "_raw";
         setTimeout(() => {
             if (copiedRowKey === sku + "_raw") copiedRowKey = null;
+        }, 2000);
+    }
+
+    async function copySkuWithSizes(m: MissingSkuItem) {
+        const sizesStr = m.sizes && m.sizes.length > 0 ? m.sizes.join(", ") : (m.variation || "");
+        const text = `${m.sku} (Size: ${sizesStr})`;
+        await navigator.clipboard.writeText(text);
+        copiedRowKey = m.sku + "_info";
+        setTimeout(() => {
+            if (copiedRowKey === m.sku + "_info") copiedRowKey = null;
         }, 2000);
     }
 
@@ -1278,26 +1321,51 @@
                         class="p-5 bg-white dark:bg-slate-900 border-2 border-amber-300 dark:border-amber-700/60 rounded-2xl shadow-sm space-y-4"
                     >
                         <!-- Header Card -->
-                        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-amber-100 dark:border-amber-900/40 pb-3">
+                        <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-amber-100 dark:border-amber-900/40 pb-3">
                             <div class="flex items-start gap-3">
-                                <div class="w-9 h-9 rounded-xl bg-amber-100 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 flex items-center justify-center shrink-0 mt-0.5">
+                                <div class="w-10 h-10 rounded-xl bg-amber-100 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 flex items-center justify-center shrink-0 mt-0.5">
                                     <AlertTriangle class="w-5 h-5" />
                                 </div>
                                 <div>
-                                    <h4 class="text-sm font-bold text-amber-900 dark:text-amber-200 flex items-center gap-2">
+                                    <h4 class="text-sm font-bold text-amber-900 dark:text-amber-200 flex items-center gap-2 flex-wrap">
                                         <span>Ditemukan {missingSkusList.length} SKU Belum Terdaftar di Database Gudang</span>
                                         <span class="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-amber-200 dark:bg-amber-900/80 text-amber-800 dark:text-amber-200">
                                             {missingSkusList.length} SKU
                                         </span>
+                                        {#if missingWithMultipleSizesCount > 0}
+                                            <span class="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-purple-100 dark:bg-purple-950/80 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800 flex items-center gap-1">
+                                                <Sparkles class="w-3 h-3 text-purple-500" />
+                                                <span>{missingWithMultipleSizesCount} SKU memiliki &gt; 1 Ukuran</span>
+                                            </span>
+                                        {/if}
+                                        {#if totalMissingPcs > 0}
+                                            <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
+                                                Total {totalMissingPcs} pcs tertahan
+                                            </span>
+                                        {/if}
                                     </h4>
                                     <p class="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
-                                        Daftar baris referensi SKU asli dari file JSON yang belum tercatat. Copy baris di bawah untuk mencari & mengubah langsung pada file JSON sebelum di-import.
+                                        Daftar referensi SKU beserta ukuran (size) dan variasi yang terdeteksi dari file JSON. Kamu bisa copy baris untuk edit file JSON, atau klik <strong>+ Tambah Produk</strong> untuk mendaftarkan langsung ke Master Data.
                                     </p>
                                 </div>
                             </div>
 
                             <!-- Action Buttons Copy All -->
-                            <div class="flex items-center gap-2 shrink-0">
+                            <div class="flex items-center gap-2 shrink-0 flex-wrap">
+                                <button
+                                    type="button"
+                                    onclick={copyAllSummary}
+                                    class="px-3 py-2 bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/60 dark:hover:bg-purple-900/60 text-purple-700 dark:text-purple-200 text-xs font-bold rounded-xl border border-purple-200 dark:border-purple-800 flex items-center gap-1.5 transition-all"
+                                    title="Copy ringkasan SKU dan daftar ukuran semua produk yang belum terdaftar"
+                                >
+                                    {#if isCopiedAllSummary}
+                                        <CheckCheck class="w-4 h-4 text-emerald-500" />
+                                        <span class="text-emerald-700 dark:text-emerald-300">Tersalin!</span>
+                                    {:else}
+                                        <Copy class="w-4 h-4 text-purple-600" />
+                                        <span>Copy Ringkasan SKU & Ukuran</span>
+                                    {/if}
+                                </button>
                                 <button
                                     type="button"
                                     onclick={copyAllJsonLines}
@@ -1323,7 +1391,7 @@
                                         <span>Tersalin!</span>
                                     {:else}
                                         <Copy class="w-4 h-4" />
-                                        <span>Copy List SKU Saja</span>
+                                        <span>List SKU Saja</span>
                                     {/if}
                                 </button>
                             </div>
@@ -1336,8 +1404,8 @@
                                 <input
                                     type="text"
                                     bind:value={missingSearchQuery}
-                                    placeholder="Filter SKU (contoh: BKA 44)..."
-                                    class="w-full pl-9 pr-3.5 py-2 text-xs rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-amber-500 font-mono"
+                                    placeholder="Cari berdasarkan SKU, Nama Produk, Ukuran (contoh: 4XL, L, BKA 44)..."
+                                    class="w-full pl-9 pr-3.5 py-2 text-xs rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-amber-500 font-sans"
                                 />
                             </div>
                             {#if missingSearchQuery}
@@ -1351,48 +1419,166 @@
                             {/if}
                         </div>
 
-                        <!-- Simple One-Line List -->
-                        <div class="max-h-80 overflow-y-auto space-y-2 p-1.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/40">
+                        <!-- Rich Cards List for Missing SKUs -->
+                        <div class="max-h-96 overflow-y-auto space-y-3 p-1.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/40">
                             {#each filteredMissingSkus as m, idx}
                                 <div
-                                    class="flex items-center justify-between gap-3 p-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:border-amber-400 dark:hover:border-amber-600 transition-all shadow-xs group"
+                                    class="p-4 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:border-amber-400 dark:hover:border-amber-600 transition-all shadow-xs space-y-3 group"
                                 >
-                                    <div class="flex items-center gap-3 overflow-hidden min-w-0">
-                                        <span class="text-[11px] font-mono text-slate-400 w-6 text-right shrink-0 select-none">
-                                            {idx + 1}.
-                                        </span>
-                                        <code class="font-mono text-xs font-bold text-amber-600 dark:text-amber-400 truncate select-all">
-                                            {formatJsonSkuLine(m.sku)}
-                                        </code>
+                                    <!-- Header Row: SKU, Size Badges & Action Buttons -->
+                                    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                                        <div class="flex items-center gap-2 flex-wrap">
+                                            <span class="text-xs font-mono text-slate-400 font-bold select-none">
+                                                {idx + 1}.
+                                            </span>
+                                            <code class="px-2.5 py-1 bg-amber-50 dark:bg-amber-950/70 text-amber-700 dark:text-amber-300 font-mono font-bold text-xs rounded-lg border border-amber-200 dark:border-amber-800/80 select-all">
+                                                {m.sku}
+                                            </code>
+
+                                            <!-- Size Badge Highlight -->
+                                            {#if (m.sizes && m.sizes.length > 1) || m.has_multiple_sizes}
+                                                <span class="px-2.5 py-0.5 text-[11px] font-extrabold rounded-full bg-purple-100 dark:bg-purple-950/80 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800 flex items-center gap-1 shadow-2xs">
+                                                    <Sparkles class="w-3 h-3 text-purple-500" />
+                                                    <span>{m.sizes ? m.sizes.length : 2} Ukuran:</span>
+                                                    <span class="underline decoration-purple-400">{m.sizes ? m.sizes.join(", ") : ""}</span>
+                                                </span>
+                                            {:else if m.sizes && m.sizes.length === 1}
+                                                <span class="px-2.5 py-0.5 text-[11px] font-bold rounded-full bg-sky-100 dark:bg-sky-950/80 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800 flex items-center gap-1">
+                                                    <span>Ukuran:</span>
+                                                    <span class="font-extrabold">{m.sizes[0]}</span>
+                                                </span>
+                                            {:else}
+                                                <span class="px-2 py-0.5 text-[10px] font-medium rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400">
+                                                    Ukuran Standar
+                                                </span>
+                                            {/if}
+
+                                            {#if m.total_qty}
+                                                <span class="px-2 py-0.5 text-[10px] font-bold rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
+                                                    {m.total_qty} pcs ({m.order_count || 1} pesanan)
+                                                </span>
+                                            {/if}
+                                        </div>
+
+                                        <!-- Action Buttons per Item -->
+                                        <div class="flex items-center gap-1.5 shrink-0 flex-wrap">
+                                            <button
+                                                type="button"
+                                                onclick={() => copyJsonLine(m.sku)}
+                                                class="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-bold rounded-lg bg-amber-50 dark:bg-amber-950/60 text-amber-800 dark:text-amber-200 hover:bg-amber-100 dark:hover:bg-amber-900/60 border border-amber-200 dark:border-amber-800 transition-all shadow-xs"
+                                                title="Copy satu baris JSON: &quot;Nomor Referensi SKU&quot;: &quot;{m.sku}&quot;,"
+                                            >
+                                                {#if copiedRowKey === m.sku + "_line"}
+                                                    <CheckCheck class="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                                                    <span class="text-emerald-700 dark:text-emerald-300">Tersalin!</span>
+                                                {:else}
+                                                    <Copy class="w-3.5 h-3.5 text-amber-600" />
+                                                    <span>Copy Baris JSON</span>
+                                                {/if}
+                                            </button>
+
+                                            <button
+                                                type="button"
+                                                onclick={() => copySkuValueOnly(m.sku)}
+                                                class="inline-flex items-center px-2 py-1.5 text-xs font-semibold rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 transition-all"
+                                                title="Copy hanya nilai SKU: {m.sku}"
+                                            >
+                                                {#if copiedRowKey === m.sku + "_raw"}
+                                                    <CheckCheck class="w-3.5 h-3.5 text-emerald-500" />
+                                                    <span class="text-emerald-600 dark:text-emerald-400 ml-1">Tersalin!</span>
+                                                {:else}
+                                                    <span>SKU</span>
+                                                {/if}
+                                            </button>
+
+                                            <button
+                                                type="button"
+                                                onclick={() => copySkuWithSizes(m)}
+                                                class="inline-flex items-center gap-1 px-2 py-1.5 text-xs font-semibold rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 transition-all"
+                                                title="Copy SKU beserta daftar ukuran: {m.sku} (Size: {(m.sizes || []).join(', ')})"
+                                            >
+                                                {#if copiedRowKey === m.sku + "_info"}
+                                                    <CheckCheck class="w-3.5 h-3.5 text-emerald-500" />
+                                                    <span class="text-emerald-600 dark:text-emerald-400 ml-1">Tersalin!</span>
+                                                {:else}
+                                                    <Tag class="w-3 h-3 text-slate-500" />
+                                                    <span>Info Size</span>
+                                                {/if}
+                                            </button>
+
+                                            <a
+                                                href={`/superadmin/products/create?sku=${encodeURIComponent(m.sku)}&name=${encodeURIComponent(m.product_name || '')}&seller_id=${sellerId || ''}&sizes=${encodeURIComponent((m.sizes || []).join(','))}`}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                class="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-bold rounded-lg bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 border border-emerald-200 dark:border-emerald-800 transition-all shadow-xs"
+                                                title="Buka form Tambah Produk di tab baru dengan SKU dan ukuran otomatis terisi"
+                                            >
+                                                <Plus class="w-3.5 h-3.5" />
+                                                <span>+ Tambah Produk</span>
+                                            </a>
+                                        </div>
                                     </div>
-                                    <div class="flex items-center gap-2 shrink-0">
-                                        <button
-                                            type="button"
-                                            onclick={() => copyJsonLine(m.sku)}
-                                            class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg bg-amber-50 dark:bg-amber-950/60 text-amber-800 dark:text-amber-200 hover:bg-amber-100 dark:hover:bg-amber-900/60 border border-amber-200 dark:border-amber-800 transition-all shadow-xs"
-                                            title="Copy satu baris JSON: &quot;Nomor Referensi SKU&quot;: &quot;{m.sku}&quot;,"
-                                        >
-                                            {#if copiedRowKey === m.sku + "_line"}
-                                                <CheckCheck class="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
-                                                <span class="text-emerald-700 dark:text-emerald-300">Tersalin!</span>
-                                            {:else}
-                                                <Copy class="w-3.5 h-3.5 text-amber-600" />
-                                                <span>Copy Baris</span>
-                                            {/if}
-                                        </button>
-                                        <button
-                                            type="button"
-                                            onclick={() => copySkuValueOnly(m.sku)}
-                                            class="inline-flex items-center px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 transition-all"
-                                            title="Copy hanya nilai SKU: {m.sku}"
-                                        >
-                                            {#if copiedRowKey === m.sku + "_raw"}
-                                                <CheckCheck class="w-3.5 h-3.5 text-emerald-500" />
-                                                <span class="text-emerald-600 dark:text-emerald-400 ml-1">Tersalin!</span>
-                                            {:else}
-                                                <span>SKU Saja</span>
-                                            {/if}
-                                        </button>
+
+                                    <!-- Product Name -->
+                                    <div>
+                                        <p class="text-xs font-semibold text-slate-800 dark:text-slate-100">
+                                            {m.product_name || "Produk Tanpa Nama di JSON"}
+                                        </p>
+                                    </div>
+
+                                    <!-- Sizes & Variations Details Box -->
+                                    <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800/60 space-y-2 text-xs">
+                                        <!-- List Ukuran Terdeteksi -->
+                                        {#if m.sizes && m.sizes.length > 0}
+                                            <div class="flex items-center gap-2 flex-wrap">
+                                                <span class="text-[11px] font-bold text-slate-500 dark:text-slate-400">
+                                                    Ukuran Terdeteksi ({m.sizes.length}):
+                                                </span>
+                                                <div class="flex items-center gap-1.5 flex-wrap">
+                                                    {#each m.sizes as sz}
+                                                        <span class="px-2.5 py-0.5 rounded-md font-mono font-black text-[11px] bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 shadow-2xs">
+                                                            {sz}
+                                                        </span>
+                                                    {/each}
+                                                </div>
+                                            </div>
+                                        {/if}
+
+                                        <!-- Variasi Asli dari JSON -->
+                                        {#if m.variations && m.variations.length > 0}
+                                            <div class="flex items-start gap-2 flex-wrap">
+                                                <span class="text-[11px] font-bold text-slate-500 dark:text-slate-400 mt-0.5">
+                                                    Variasi di JSON:
+                                                </span>
+                                                <div class="flex items-center gap-1.5 flex-wrap">
+                                                    {#each m.variations as vText}
+                                                        <span class="px-2 py-0.5 rounded-md text-[10px] font-medium bg-amber-50/70 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 border border-amber-200/60 dark:border-amber-800/40">
+                                                            {vText}
+                                                        </span>
+                                                    {/each}
+                                                </div>
+                                            </div>
+                                        {:else if m.variation}
+                                            <div class="text-[11px] text-slate-600 dark:text-slate-300">
+                                                <span class="font-bold text-slate-500">Variasi:</span> {m.variation}
+                                            </div>
+                                        {/if}
+
+                                        <!-- Alert Info jika Lebih dari 1 Ukuran -->
+                                        {#if (m.sizes && m.sizes.length > 1) || m.has_multiple_sizes}
+                                            <div class="flex items-center gap-1.5 text-[11px] font-medium text-purple-700 dark:text-purple-300 bg-purple-50 dark:bg-purple-950/40 px-2.5 py-1.5 rounded-md border border-purple-200 dark:border-purple-900/60">
+                                                <Sparkles class="w-3.5 h-3.5 shrink-0 text-purple-500" />
+                                                <span>
+                                                    Perhatian: Ditemukan <strong>{m.sizes ? m.sizes.length : 2} ukuran berbeda</strong> ({m.sizes ? m.sizes.join(", ") : ""}) untuk produk ini. Pastikan menambahkan masing-masing varian ukuran tersebut ke dalam produk manual ya bwang!
+                                                </span>
+                                            </div>
+                                        {/if}
+
+                                        {#if m.missing_parts && m.missing_parts.length > 0}
+                                            <div class="text-[11px] text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/40 px-2.5 py-1.5 rounded-md border border-rose-200 dark:border-rose-900/60">
+                                                Komponen bundle yang belum ada di database: <strong>{m.missing_parts.join(", ")}</strong>
+                                            </div>
+                                        {/if}
                                     </div>
                                 </div>
                             {:else}

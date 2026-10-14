@@ -42,6 +42,7 @@
         categories = [],
         konveksis = [],
         variantTemplates = [],
+        prefill = null,
     }: {
         product?: {
             id: number;
@@ -59,6 +60,12 @@
         categories?: OptionItem[];
         konveksis?: OptionItem[];
         variantTemplates?: VariantTemplate[];
+        prefill?: {
+            sku?: string;
+            product_name?: string;
+            seller_id?: string | number;
+            sizes?: string;
+        } | null;
     } = $props();
 
     const isEdit = $derived(!!product);
@@ -66,26 +73,37 @@
     let selectedTemplateId = $state<string>('');
     let isSkuAlertModalOpen = $state(false);
 
-    let form = $state({
-        seller_id: product?.seller_id ?? (sellers[0]?.id ?? ''),
-        brand_id: product?.brand_id ?? '',
-        category_id: product?.category_id ?? '',
-        konveksi_id: product?.konveksi_id ?? '',
-        product_name: product?.product_name ?? '',
-        sku: product?.sku ?? '',
-        product_type: product?.product_type ?? 'single',
-        variants: product?.variants?.length
-            ? product.variants.map((v) => ({ ...v }))
+    const initialVariants: VariantInput[] = product?.variants?.length
+        ? product.variants.map((v) => ({ ...v }))
+        : (prefill?.sizes && prefill.sizes.trim()
+            ? prefill.sizes.split(',').map((s) => s.trim()).filter(Boolean).map((sz, idx) => ({
+                  sku: prefill?.sku ? `${prefill.sku.trim()}-${sz}` : `V${idx + 1}`,
+                  size: sz,
+                  color: 'STANDARD',
+                  price: 0,
+                  selling_price: 0,
+                  barcode: '',
+              }))
             : [
                   {
-                      sku: '',
+                      sku: prefill?.sku ?? '',
                       size: 'ALL SIZE',
                       color: 'STANDARD',
                       price: 0,
                       selling_price: 0,
                       barcode: '',
                   },
-              ],
+              ]);
+
+    let form = $state({
+        seller_id: product?.seller_id ?? (prefill?.seller_id ? Number(prefill.seller_id) : (sellers[0]?.id ?? '')),
+        brand_id: product?.brand_id ?? '',
+        category_id: product?.category_id ?? '',
+        konveksi_id: product?.konveksi_id ?? '',
+        product_name: product?.product_name ?? (prefill?.product_name ?? ''),
+        sku: product?.sku ?? (prefill?.sku ?? ''),
+        product_type: product?.product_type ?? 'single',
+        variants: initialVariants,
     });
 
     function addVariant() {

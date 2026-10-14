@@ -59,7 +59,7 @@ class ProductController extends Controller
         ]);
     }
 
-    public function create()
+    public function create(Request $request)
     {
         return Inertia::render('Superadmin/Warehouse/Products/ProductForm', [
             'product' => null,
@@ -68,6 +68,12 @@ class ProductController extends Controller
             'categories' => Category::select('id', 'name')->get(),
             'konveksis' => Konveksi::select('id', 'name')->get(),
             'variantTemplates' => VariantTemplate::with('items')->get(),
+            'prefill' => [
+                'sku' => $request->query('sku', ''),
+                'product_name' => $request->query('name', ''),
+                'seller_id' => $request->query('seller_id', ''),
+                'sizes' => $request->query('sizes', ''),
+            ],
         ]);
     }
 
