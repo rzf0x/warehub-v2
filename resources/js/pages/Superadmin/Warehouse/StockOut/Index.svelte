@@ -5,7 +5,8 @@
     import { router, Link } from '@inertiajs/svelte';
     import { 
         ArrowUpRight, Search, Plus, Trash2, Printer, BarChart3, Calculator, 
-        FileText, Store, Package, DollarSign, Wallet, Sparkles, User, Calendar
+        FileText, Store, Package, DollarSign, Wallet, Sparkles, User, Calendar,
+        Edit2
     } from '@lucide/svelte';
 
     interface Item {
@@ -408,6 +409,13 @@
                                 >
                                     <FileText class="h-4 w-4" />
                                 </a>
+                                <Link
+                                    href={`/superadmin/warehouse/stock-out/${item.id}/edit`}
+                                    class="inline-flex items-center gap-1 rounded-lg p-2 text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-950/50 transition-colors"
+                                    title="Edit Transaksi Stok Keluar"
+                                >
+                                    <Edit2 class="h-4 w-4" />
+                                </Link>
                                 <button
                                     onclick={() => openDeleteModal(item)}
                                     class="inline-flex items-center gap-1 rounded-lg p-2 text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/50 transition-colors"

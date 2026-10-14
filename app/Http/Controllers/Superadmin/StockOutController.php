@@ -327,12 +327,26 @@ class StockOutController extends Controller
 
         DB::transaction(function () use ($validated, $request, $stockOut) {
             foreach ($stockOut->items as $item) {
-                $stock = Stock::where('warehouse_id', $stockOut->warehouse_id)
-                    ->where('product_variant_id', $item->product_variant_id)
-                    ->first();
+                $oldVariant = ProductVariant::with('product')->find($item->product_variant_id);
+                if ($oldVariant && $oldVariant->product && $oldVariant->product->product_type === 'bundle') {
+                    $bundleItems = BundleItem::where('bundle_variant_id', $oldVariant->id)->get();
+                    foreach ($bundleItems as $bItem) {
+                        $compQty = ($bItem->qty ?? $bItem->quantity ?? 1) * $item->qty;
+                        $stock = Stock::where('warehouse_id', $stockOut->warehouse_id)
+                            ->where('product_variant_id', $bItem->component_variant_id)
+                            ->first();
+                        if ($stock) {
+                            $stock->increment('qty', $compQty);
+                        }
+                    }
+                } else {
+                    $stock = Stock::where('warehouse_id', $stockOut->warehouse_id)
+                        ->where('product_variant_id', $item->product_variant_id)
+                        ->first();
 
-                if ($stock) {
-                    $stock->increment('qty', $item->qty);
+                    if ($stock) {
+                        $stock->increment('qty', $item->qty);
+                    }
                 }
             }
 
