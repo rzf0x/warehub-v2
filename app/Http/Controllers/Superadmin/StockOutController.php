@@ -427,7 +427,11 @@ class StockOutController extends Controller
                 } else {
                     $rawItems = $decoded;
                 }
-                $suggestedBruto = $decoded['bruto'] ?? $decoded['total_payment'] ?? $decoded['matched_master_amount'] ?? $decoded['total_master_amount'] ?? null;
+                $suggestedBruto = $decoded['bruto'] ?? null;
+                $suggestedPencairan = $decoded['total_pembayaran_kalkulasi'] ?? $decoded['matched_master_amount'] ?? $decoded['total_master_amount'] ?? $decoded['total_payment'] ?? null;
+                if ($suggestedBruto === null && $suggestedPencairan !== null) {
+                    $suggestedBruto = $suggestedPencairan;
+                }
             }
         } elseif ($request->filled('items') && is_array($request->input('items'))) {
             $rawItems = $request->input('items');
@@ -505,6 +509,10 @@ class StockOutController extends Controller
                 $subMatched = [];
                 $hasMissing = false;
 
+                $partsCount = max(1, count($parts));
+                $totalLinePcs = max(1, $qty * $partsCount);
+                $unitSelling = $paymentAmt > 0 ? (float)round($paymentAmt / $totalLinePcs, 2) : 0;
+
                 foreach ($parts as $idx => $part) {
                     $testPart = $part;
                     $partV = $this->resolveVariantFromSkuAndSize($testPart, $variantName, $rawSku, $skuMap);
@@ -532,7 +540,7 @@ class StockOutController extends Controller
                             'color' => $partV->color,
                             'qty' => $qty,
                             'price' => (float)$partV->price,
-                            'selling_price' => (float)$paymentAmt > 0 ? (float)round($paymentAmt / max(1, count($parts))) : (float)($partV->price ?? 0),
+                            'selling_price' => $unitSelling > 0 ? $unitSelling : (float)($partV->price ?? 0),
                             'available_stock' => (int)$stk,
                         ];
                     } else {
@@ -555,6 +563,7 @@ class StockOutController extends Controller
             $directV = $this->resolveVariantFromSkuAndSize($rawSku, $variantName, $rawSku, $skuMap);
             if ($directV) {
                 $stk = $warehouseId ? ($directV->stocks->firstWhere('warehouse_id', $warehouseId)->qty ?? 0) : ($directV->stocks->sum('qty') ?? 0);
+                $unitSelling = $paymentAmt > 0 ? (float)round($paymentAmt / max(1, $qty), 2) : (float)($directV->price ?? 0);
                 $matchedItems[] = [
                     'product_variant_id' => $directV->id,
                     'sku' => $directV->sku,
@@ -565,7 +574,7 @@ class StockOutController extends Controller
                     'color' => $directV->color,
                     'qty' => $qty,
                     'price' => (float)$directV->price,
-                    'selling_price' => (float)$paymentAmt > 0 ? (float)$paymentAmt : (float)($directV->price ?? 0),
+                    'selling_price' => $unitSelling,
                     'available_stock' => (int)$stk,
                 ];
                 continue;
@@ -581,6 +590,7 @@ class StockOutController extends Controller
             'missing_skus' => array_values($missingSkus),
             'resis' => array_values($resisSet),
             'suggested_bruto' => $suggestedBruto ? (float)$suggestedBruto : null,
+            'suggested_pencairan' => $suggestedPencairan ? (float)$suggestedPencairan : null,
         ]);
     }
 

@@ -162,7 +162,7 @@
                     ...item,
                     qty: Number(item.qty || 0),
                     price: Number(item.price || 0),
-                    selling_price: Math.round(Number(item.selling_price || 0)),
+                    selling_price: Number(Number(item.selling_price || 0).toFixed(2)),
                 });
             } else {
                 const existing = map.get(key)!;
@@ -177,7 +177,7 @@
                     existingSelling * existingQty + itemSelling * itemQty;
                 const newSellingPrice =
                     combinedQty > 0
-                        ? Math.round(totalSelling / combinedQty)
+                        ? Number((totalSelling / combinedQty).toFixed(2))
                         : existingSelling;
 
                 existing.qty = combinedQty;
@@ -608,7 +608,7 @@
                         color: m.color,
                         qty: m.qty,
                         price: Number(m.price || 0),
-                        selling_price: Math.round(Number(m.selling_price || 0)),
+                        selling_price: Number(Number(m.selling_price || 0).toFixed(2)),
                         available_stock: m.available_stock,
                     });
                 });
@@ -653,20 +653,25 @@
         formItems.reduce((acc, i) => acc + (Number(i.qty) || 0), 0),
     );
     let liveTotalHpp = $derived(
-        formItems.reduce(
-            (acc, i) => acc + (Number(i.qty) || 0) * (Number(i.price) || 0),
-            0,
+        Math.round(
+            formItems.reduce(
+                (acc, i) => acc + (Number(i.qty) || 0) * (Number(i.price) || 0),
+                0,
+            ),
         ),
     );
     let liveTotalSelling = $derived(
-        formItems.reduce(
-            (acc, i) =>
-                acc + (Number(i.qty) || 0) * (Number(i.selling_price) || 0),
-            0,
+        Math.round(
+            formItems.reduce(
+                (acc, i) =>
+                    acc + (Number(i.qty) || 0) * (Number(i.selling_price) || 0),
+                0,
+            ),
         ),
     );
     let liveBruto = $derived(bruto > 0 ? bruto : liveTotalSelling);
-    let liveEstProfit = $derived(liveBruto - liveTotalHpp);
+    let liveMarketplaceFees = $derived(Math.max(0, liveBruto - liveTotalSelling));
+    let liveEstProfit = $derived(liveTotalSelling - liveTotalHpp);
 
     // Deficit Items (Stok 0 atau Qty Keluar > Stok Gudang)
     let adjustInputMap = $state<Record<number, number>>({});
@@ -1627,23 +1632,30 @@
                 class="rounded-2xl bg-white dark:bg-slate-900 p-4 border border-slate-200 dark:border-slate-800 shadow-xs space-y-1"
             >
                 <span
-                    class="text-xs font-bold uppercase tracking-wider text-slate-400"
-                    >Total Harga Jual</span
+                    class="text-xs font-bold uppercase tracking-wider text-cyan-600 dark:text-cyan-400"
+                    >Total Pencairan (Netto)</span
                 >
                 <div
                     class="text-xl font-extrabold text-cyan-600 dark:text-cyan-400 truncate"
                 >
                     {formatRupiah(liveTotalSelling)}
                 </div>
-                <p class="text-[10px] text-slate-400">Σ (Harga Jual × Qty)</p>
+                <p class="text-[10px] text-slate-400">Pencairan Bersih (Σ Jual × Qty)</p>
             </div>
             <div
                 class="rounded-2xl bg-white dark:bg-slate-900 p-4 border border-slate-200 dark:border-slate-800 shadow-xs space-y-1"
             >
-                <span
-                    class="text-xs font-bold uppercase tracking-wider text-slate-400"
-                    >Total Bruto</span
-                >
+                <div class="flex items-center justify-between">
+                    <span
+                        class="text-xs font-bold uppercase tracking-wider text-emerald-600 dark:text-emerald-400"
+                        >Total Bruto</span
+                    >
+                    {#if liveMarketplaceFees > 0}
+                        <span class="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400" title="Potongan Biaya Admin / Voucher Marketplace">
+                            Potongan: -{formatRupiah(liveMarketplaceFees)}
+                        </span>
+                    {/if}
+                </div>
                 <div
                     class="text-xl font-extrabold text-emerald-600 dark:text-emerald-400 truncate"
                 >
@@ -1656,15 +1668,15 @@
             >
                 <span
                     class="text-xs font-bold uppercase tracking-wider text-violet-500"
-                    >Estimasi Profit</span
+                    >Estimasi Profit Netto</span
                 >
                 <div
                     class="text-xl font-extrabold text-violet-600 dark:text-violet-400 truncate"
                 >
                     {formatRupiah(liveEstProfit)}
                 </div>
-                <p class="text-[10px] font-semibold text-violet-500 dark:text-violet-400 truncate" title="Bruto ({formatRupiah(liveBruto)}) - HPP ({formatRupiah(liveTotalHpp)})">
-                    Bruto - Total HPP Modal
+                <p class="text-[10px] font-semibold text-violet-500 dark:text-violet-400 truncate" title="Pencairan ({formatRupiah(liveTotalSelling)}) - Total HPP Modal ({formatRupiah(liveTotalHpp)})">
+                    Pencairan - Total HPP Modal
                 </p>
             </div>
         </div>
@@ -2329,7 +2341,7 @@
                 class="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4"
             >
                 <div
-                    class="flex items-center gap-4 text-xs font-semibold text-slate-600 dark:text-slate-400"
+                    class="flex flex-wrap items-center gap-3 text-xs font-semibold text-slate-600 dark:text-slate-400"
                 >
                     <span
                         >Total Qty: <strong
@@ -2339,9 +2351,16 @@
                     >
                     <span class="hidden md:inline">|</span>
                     <span class="hidden md:inline"
-                        >Est. Omset Bruto: <strong
+                        >Bruto: <strong
                             class="text-emerald-600 dark:text-emerald-400 font-black"
                             >{formatRupiah(liveBruto)}</strong
+                        ></span
+                    >
+                    <span class="hidden md:inline">|</span>
+                    <span class="hidden md:inline"
+                        >Pencairan: <strong
+                            class="text-cyan-600 dark:text-cyan-400 font-black"
+                            >{formatRupiah(liveTotalSelling)}</strong
                         ></span
                     >
                 </div>
