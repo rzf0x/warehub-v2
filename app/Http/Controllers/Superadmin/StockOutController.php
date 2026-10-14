@@ -412,6 +412,8 @@ class StockOutController extends Controller
         $rawItems = [];
 
         $suggestedBruto = null;
+        $suggestedPencairan = null;
+        $expectedFileQty = null;
 
         if ($request->hasFile('file')) {
             $file = $request->file('file');
@@ -720,7 +722,7 @@ class StockOutController extends Controller
     private function parseSizeTokens(string $text): array
     {
         $sizes = [];
-        if (preg_match_all('/\b(5XL|4XL|3XL|2XL|XXL|XL|L|M|S|XS)\b/i', $text, $m)) {
+        if (preg_match_all('/\b(5XL|4XL|3XL|2XL|XXXXXL|XXXXL|XXXL|XXL|XL|L|M|S|XS)\b/i', $text, $m)) {
             foreach ($m[1] as $s) {
                 $sz = strtoupper($s);
                 $sizes[] = $sz;
@@ -728,9 +730,24 @@ class StockOutController extends Controller
                 if ($sz === 'XXL') $sizes[] = '2XL';
                 if ($sz === '3XL') $sizes[] = 'XXXL';
                 if ($sz === 'XXXL') $sizes[] = '3XL';
+                if ($sz === '4XL') $sizes[] = 'XXXXL';
+                if ($sz === 'XXXXL') $sizes[] = '4XL';
+                if ($sz === '5XL') $sizes[] = 'XXXXXL';
+                if ($sz === 'XXXXXL') $sizes[] = '5XL';
             }
         }
-        return array_unique($sizes);
+
+        // Also check explicit size prefixes (e.g. "Size 30", "Ukuran 32", "Size: 28")
+        if (preg_match_all('/(?<!all\s)(?<!plus\s)(?<!big\s)(?<!free\s)\b(?:size|ukuran|sz|no\.?)\s*[:\-]?\s*(\d{1,3}|[A-Za-z0-9]{1,4})\b/i', $text, $m)) {
+            foreach ($m[1] as $s) {
+                $sz = strtoupper(trim($s));
+                if (!in_array($sz, ['ANAK', 'DEWASA', 'PRIA', 'WANITA', 'COWOK', 'CEWEK', 'BAYI', 'KIDS', 'MAN', 'WOMAN'])) {
+                    $sizes[] = $sz;
+                }
+            }
+        }
+
+        return array_values(array_unique($sizes));
     }
 
     private function resolveVariantFromSkuAndSize(string $rawSku, string $varText, string $fullSkuText, array $skuMap)
@@ -758,7 +775,12 @@ class StockOutController extends Controller
             $prefix2 = $noSpaceSku . '-';
             foreach ($skuMap as $dbSku => $variant) {
                 $vSize = strtoupper(trim((string)$variant->size));
-                $sizeMatched = ($vSize === $size || ($size === 'XXL' && $vSize === '2XL') || ($size === '2XL' && $vSize === 'XXL'));
+                $sizeMatched = ($vSize === $size || 
+                    ($size === 'XXL' && $vSize === '2XL') || ($size === '2XL' && $vSize === 'XXL') ||
+                    ($size === 'XXXL' && $vSize === '3XL') || ($size === '3XL' && $vSize === 'XXXL') ||
+                    ($size === 'XXXXL' && $vSize === '4XL') || ($size === '4XL' && $vSize === 'XXXXL') ||
+                    ($size === 'XXXXXL' && $vSize === '5XL') || ($size === '5XL' && $vSize === 'XXXXXL')
+                );
                 if ($sizeMatched) {
                     if (str_starts_with($dbSku, $prefix1) || str_starts_with($dbSku, $prefix2) || str_starts_with($dbSku, $cleanSku . $size) || str_starts_with($dbSku, $noSpaceSku . $size)) {
                         return $variant;
