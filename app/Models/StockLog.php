@@ -31,6 +31,11 @@ class StockLog extends Model
     protected static function booted()
     {
         static::creating(function ($log) {
+            // Ensure note fits safely within VARCHAR limits if DB column is varchar(255)
+            if ($log->note) {
+                $log->note = \Illuminate\Support\Str::limit((string)$log->note, 190);
+            }
+
             // Auto sync qty fields
             if ($log->qty_before !== null && $log->quantity_before === null) {
                 $log->quantity_before = (int)$log->qty_before;

@@ -287,14 +287,17 @@ class StockOutController extends Controller
 
                 $variant = ProductVariant::with('product')->find($itemData['product_variant_id']);
 
+                $logNote = $this->formatStockLogNote($stockOut, "Penjualan Resi");
+                $bundleLogNote = $this->formatStockLogNote($stockOut, "Penjualan Bundle");
+
                 if ($variant && $variant->product && $variant->product->product_type === 'bundle') {
                     $bundleItems = BundleItem::where('bundle_variant_id', $variant->id)->get();
                     foreach ($bundleItems as $bItem) {
                         $deductQty = ($bItem->qty ?? $bItem->quantity ?? 1) * $itemData['qty'];
-                        $this->deductPhysicalStock($validated['warehouse_id'], $bItem->component_variant_id, $deductQty, $stockOut->id, "Penjualan Bundle #{$stockOut->resi_summary}");
+                        $this->deductPhysicalStock($validated['warehouse_id'], $bItem->component_variant_id, $deductQty, $stockOut->id, $bundleLogNote);
                     }
                 } else {
-                    $this->deductPhysicalStock($validated['warehouse_id'], $itemData['product_variant_id'], $itemData['qty'], $stockOut->id, "Penjualan Resi #{$stockOut->resi_summary}");
+                    $this->deductPhysicalStock($validated['warehouse_id'], $itemData['product_variant_id'], $itemData['qty'], $stockOut->id, $logNote);
                 }
             }
         });
@@ -371,14 +374,17 @@ class StockOutController extends Controller
 
                 $variant = ProductVariant::with('product')->find($itemData['product_variant_id']);
 
+                $logNote = $this->formatStockLogNote($stockOut, "Update Stock Out Resi");
+                $bundleLogNote = $this->formatStockLogNote($stockOut, "Update Stock Out Bundle");
+
                 if ($variant && $variant->product && $variant->product->product_type === 'bundle') {
                     $bundleItems = BundleItem::where('bundle_variant_id', $variant->id)->get();
                     foreach ($bundleItems as $bItem) {
                         $deductQty = ($bItem->qty ?? $bItem->quantity ?? 1) * $itemData['qty'];
-                        $this->deductPhysicalStock($validated['warehouse_id'], $bItem->component_variant_id, $deductQty, $stockOut->id, "Update Stock Out Bundle #{$stockOut->resi_summary}");
+                        $this->deductPhysicalStock($validated['warehouse_id'], $bItem->component_variant_id, $deductQty, $stockOut->id, $bundleLogNote);
                     }
                 } else {
-                    $this->deductPhysicalStock($validated['warehouse_id'], $itemData['product_variant_id'], $itemData['qty'], $stockOut->id, "Update Stock Out Resi #{$stockOut->resi_summary}");
+                    $this->deductPhysicalStock($validated['warehouse_id'], $itemData['product_variant_id'], $itemData['qty'], $stockOut->id, $logNote);
                 }
             }
         });
@@ -1017,6 +1023,36 @@ class StockOutController extends Controller
         return $results;
     }
 
+    /**
+     * Generate a concise summary for StockLog note from resi_summary and stockOut id
+     */
+    private function formatStockLogNote(StockOut $stockOut, string $prefix = 'Penjualan Resi'): string
+    {
+        $resiStr = trim((string)($stockOut->resi_summary ?? ''));
+
+        // If resi_summary is a JSON array string
+        if (str_starts_with($resiStr, '[')) {
+            $decoded = json_decode($resiStr, true);
+            if (is_array($decoded)) {
+                $count = count($decoded);
+                $first = $decoded[0] ?? [];
+                $firstCode = $first['no_resi'] ?? $first['order_id'] ?? null;
+                if ($firstCode && $count > 1) {
+                    return \Illuminate\Support\Str::limit("{$prefix} #{$firstCode} (+ " . ($count - 1) . " resi) [ID #{$stockOut->id}]", 190);
+                } elseif ($firstCode) {
+                    return \Illuminate\Support\Str::limit("{$prefix} #{$firstCode} [ID #{$stockOut->id}]", 190);
+                }
+                return "{$prefix} [ID #{$stockOut->id}] ({$count} pesanan)";
+            }
+        }
+
+        if (!$resiStr) {
+            return "{$prefix} [ID #{$stockOut->id}]";
+        }
+
+        return \Illuminate\Support\Str::limit("{$prefix} #{$resiStr} [ID #{$stockOut->id}]", 190);
+    }
+
     private function deductPhysicalStock(int $warehouseId, int $variantId, int $qty, int $stockOutId, string $logNote): void
     {
         $stockRecord = Stock::firstOrCreate(
@@ -1028,22 +1064,55 @@ class StockOutController extends Controller
         $stockRecord->decrement('qty', $qty);
         $qtyAfter = $stockRecord->fresh()->qty;
 
-        StockLog::create([
-            'product_variant_id' => $variantId,
-            'warehouse_id' => $warehouseId,
-            'reference_type' => StockOut::class,
-            'reference_id' => $stockOutId,
-            'qty_before' => $qtyBefore,
-            'qty_change' => -$qty,
-            'qty_after' => $qtyAfter,
-            'note' => $logNote,
-        ]);
+        $safeNote = \Illuminate\Support\Str::limit($logNote, 190);
+
+        try {
+            $logData = [
+                'reference_type' => StockOut::class,
+                'reference_id' => $stockOutId,
+                'qty_before' => $qtyBefore,
+                'qty_change' => -$qty,
+                'qty_after' => $qtyAfter,
+                'note' => $safeNote,
+            ];
+
+            if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'product_variant_id')) {
+                $logData['product_variant_id'] = $variantId;
+            }
+            if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'warehouse_id')) {
+                $logData['warehouse_id'] = $warehouseId;
+            }
+            if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'stock_id')) {
+                $logData['stock_id'] = $stockRecord->id;
+            }
+            if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'user_id')) {
+                $logData['user_id'] = auth()->id() ?? 1;
+            }
+            if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'type')) {
+                $logData['type'] = 'STOCK_OUT';
+            }
+            if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'quantity_before')) {
+                $logData['quantity_before'] = $qtyBefore;
+            }
+            if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'quantity_after')) {
+                $logData['quantity_after'] = $qtyAfter;
+            }
+            if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'change_amount')) {
+                $logData['change_amount'] = -$qty;
+            }
+
+            StockLog::create($logData);
+        } catch (\Throwable $e) {
+            \Log::warning("Gagal mencatat StockLog deductPhysicalStock: " . $e->getMessage());
+        }
     }
 
     public function destroy(StockOut $stockOut)
     {
         DB::transaction(function () use ($stockOut) {
             $stockOut->load('items');
+            $cancelLogNote = $this->formatStockLogNote($stockOut, "Pembatalan Stock Out Resi");
+
             foreach ($stockOut->items as $item) {
                 $stock = Stock::where('warehouse_id', $stockOut->warehouse_id)
                     ->where('product_variant_id', $item->product_variant_id)
@@ -1054,16 +1123,45 @@ class StockOutController extends Controller
                     $stock->increment('qty', $item->qty);
                     $qtyAfter = $stock->fresh()->qty;
 
-                    StockLog::create([
-                        'product_variant_id' => $item->product_variant_id,
-                        'warehouse_id' => $stockOut->warehouse_id,
-                        'reference_type' => StockOut::class,
-                        'reference_id' => $stockOut->id,
-                        'qty_before' => $qtyBefore,
-                        'qty_change' => $item->qty,
-                        'qty_after' => $qtyAfter,
-                        'note' => "Pembatalan Stock Out Resi #{$stockOut->resi_summary}",
-                    ]);
+                    try {
+                        $logData = [
+                            'reference_type' => StockOut::class,
+                            'reference_id' => $stockOut->id,
+                            'qty_before' => $qtyBefore,
+                            'qty_change' => $item->qty,
+                            'qty_after' => $qtyAfter,
+                            'note' => $cancelLogNote,
+                        ];
+
+                        if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'product_variant_id')) {
+                            $logData['product_variant_id'] = $item->product_variant_id;
+                        }
+                        if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'warehouse_id')) {
+                            $logData['warehouse_id'] = $stockOut->warehouse_id;
+                        }
+                        if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'stock_id')) {
+                            $logData['stock_id'] = $stock->id;
+                        }
+                        if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'user_id')) {
+                            $logData['user_id'] = auth()->id() ?? 1;
+                        }
+                        if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'type')) {
+                            $logData['type'] = 'STOCK_OUT_CANCEL';
+                        }
+                        if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'quantity_before')) {
+                            $logData['quantity_before'] = $qtyBefore;
+                        }
+                        if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'quantity_after')) {
+                            $logData['quantity_after'] = $qtyAfter;
+                        }
+                        if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'change_amount')) {
+                            $logData['change_amount'] = $item->qty;
+                        }
+
+                        StockLog::create($logData);
+                    } catch (\Throwable $e) {
+                        \Log::warning("Gagal mencatat StockLog destroy: " . $e->getMessage());
+                    }
                 }
             }
 
