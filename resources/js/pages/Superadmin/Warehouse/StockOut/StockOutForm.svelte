@@ -77,7 +77,9 @@
         sizes_count?: number;
         has_multiple_sizes?: boolean;
         total_qty?: number;
+        total_payment?: number;
         order_count?: number;
+        orders?: string[];
         missing_parts?: string[];
     }
 
@@ -434,6 +436,11 @@
     let importMissingCount = $state<number>(0);
     let missingSkusList = $state<MissingSkuItem[]>([]);
 
+    // Import file metadata from engine
+    let fileSuggestedPencairan = $state<number | null>(null);
+    let fileSuggestedBruto = $state<number | null>(null);
+    let fileExpectedQty = $state<number | null>(null);
+
     // Missing SKUs statistics & copy state
     let missingWithMultipleSizesCount = $derived(
         missingSkusList.filter(
@@ -552,6 +559,9 @@
         importProgress = 15;
         importStatusText = `Mengunggah & menganalisis file ${file.name}...`;
         missingSkusList = [];
+        fileSuggestedPencairan = null;
+        fileSuggestedBruto = null;
+        fileExpectedQty = null;
         importMatchedCount = 0;
         importMissingCount = 0;
         importTotalChunks = 1;
@@ -633,6 +643,13 @@
 
             if (resData.suggested_bruto) {
                 bruto = Number(resData.suggested_bruto);
+                fileSuggestedBruto = Number(resData.suggested_bruto);
+            }
+            if (resData.suggested_pencairan) {
+                fileSuggestedPencairan = Number(resData.suggested_pencairan);
+            }
+            if (resData.expected_file_qty) {
+                fileExpectedQty = Number(resData.expected_file_qty);
             }
 
             formItems = consolidateFormItems(resolvedMatchedItems);
@@ -676,6 +693,22 @@
     let liveBruto = $derived(bruto > 0 ? bruto : liveTotalSelling);
     let liveMarketplaceFees = $derived(Math.max(0, liveBruto - liveTotalSelling));
     let liveEstProfit = $derived(liveTotalSelling - liveTotalHpp);
+
+    // Discrepancy & Missing Tracking
+    let totalMissingAmount = $derived(
+        missingSkusList.reduce((acc, m) => acc + (Number(m.total_payment) || 0), 0),
+    );
+    let filePencairanDiff = $derived(
+        fileSuggestedPencairan && fileSuggestedPencairan > 0
+            ? Math.round(fileSuggestedPencairan - liveTotalSelling)
+            : 0,
+    );
+    let hasFinancialDiscrepancy = $derived(
+        fileSuggestedPencairan !== null && Math.abs(filePencairanDiff) > 50,
+    );
+    let hasDiscrepancyAlert = $derived(
+        missingSkusList.length > 0 || hasFinancialDiscrepancy,
+    );
 
     // Deficit Items (Stok 0 atau Qty Keluar > Stok Gudang)
     let adjustInputMap = $state<Record<number, number>>({});
@@ -1327,6 +1360,7 @@
                 <!-- Section Card Tersendiri: Missing SKUs yang Tidak Ada di Database -->
                 {#if missingSkusList.length > 0}
                     <div
+                        id="section-missing-skus"
                         class="p-5 bg-white dark:bg-slate-900 border-2 border-amber-300 dark:border-amber-700/60 rounded-2xl shadow-sm space-y-4"
                     >
                         <!-- Header Card -->
@@ -1350,6 +1384,11 @@
                                         {#if totalMissingPcs > 0}
                                             <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
                                                 Total {totalMissingPcs} pcs tertahan
+                                            </span>
+                                        {/if}
+                                        {#if totalMissingAmount > 0}
+                                            <span class="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-rose-100 dark:bg-rose-950/80 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800">
+                                                Senilai {formatRupiah(totalMissingAmount)}
                                             </span>
                                         {/if}
                                     </h4>
@@ -1465,6 +1504,11 @@
                                             {#if m.total_qty}
                                                 <span class="px-2 py-0.5 text-[10px] font-bold rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
                                                     {m.total_qty} pcs ({m.order_count || 1} pesanan)
+                                                </span>
+                                            {/if}
+                                            {#if m.total_payment && m.total_payment > 0}
+                                                <span class="px-2 py-0.5 text-[10px] font-black rounded-full bg-rose-50 dark:bg-rose-950/70 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-900/60 shadow-2xs">
+                                                    Senilai {formatRupiah(m.total_payment)}
                                                 </span>
                                             {/if}
                                         </div>
@@ -1601,22 +1645,107 @@
             </div>
         {/if}
 
+        <!-- Prominent Alert Banner: Jika Ditemukan Selisih File vs Database / SKU Belum Terdaftar -->
+        {#if hasDiscrepancyAlert}
+            <div
+                class="rounded-2xl border-2 border-amber-300 dark:border-amber-700/80 bg-gradient-to-r from-amber-50/90 via-orange-50/50 to-amber-50/90 dark:from-amber-950/40 dark:via-orange-950/30 dark:to-amber-950/40 p-5 shadow-sm space-y-4 animate-in fade-in slide-in-from-top-2 duration-300"
+            >
+                <div class="flex flex-col md:flex-row md:items-start justify-between gap-4">
+                    <div class="flex items-start gap-3.5">
+                        <div class="w-11 h-11 rounded-2xl bg-amber-500 text-white flex items-center justify-center shrink-0 shadow-md shadow-amber-500/20 mt-0.5">
+                            <AlertTriangle class="w-6 h-6 animate-pulse" />
+                        </div>
+                        <div class="space-y-1">
+                            <div class="flex items-center gap-2 flex-wrap">
+                                <h4 class="text-sm font-extrabold text-amber-950 dark:text-amber-100 flex items-center gap-2">
+                                    <span>Peringatan: Ditemukan {missingSkusList.length} SKU Belum Terdaftar & Selisih Pencairan Netto</span>
+                                </h4>
+                                <span class="px-2.5 py-0.5 rounded-full text-[10px] font-black bg-rose-100 dark:bg-rose-950/80 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800 shadow-2xs">
+                                    Selisih: -{formatRupiah(Math.abs(filePencairanDiff || totalMissingAmount))}
+                                </span>
+                                {#if totalMissingPcs > 0}
+                                    <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-200 dark:bg-amber-900/60 text-amber-900 dark:text-amber-200">
+                                        {totalMissingPcs} pcs tertahan
+                                    </span>
+                                {/if}
+                            </div>
+                            <p class="text-xs text-amber-900/80 dark:text-amber-200/80 leading-relaxed">
+                                Total pencairan bersih di file JSON adalah <strong>{formatRupiah(fileSuggestedPencairan || 0)}</strong>, namun item yang berhasil dicocokkan ke database gudang saat ini bernilai <strong>{formatRupiah(liveTotalSelling)}</strong>.
+                                Terdapat <strong>{missingSkusList.length} SKU ({totalMissingPcs} pcs)</strong> senilai <strong>{formatRupiah(totalMissingAmount || Math.abs(filePencairanDiff))}</strong> yang belum terdaftar di gudang sehingga belum bisa dipotong stoknya.
+                            </p>
+                        </div>
+                    </div>
+                    {#if missingSkusList.length > 0}
+                        <button
+                            type="button"
+                            onclick={() => {
+                                const el = document.getElementById("section-missing-skus");
+                                if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+                            }}
+                            class="shrink-0 px-3.5 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold shadow-xs flex items-center gap-1.5 transition-all self-start md:self-center"
+                        >
+                            <Search class="w-4 h-4" />
+                            <span>Lihat {missingSkusList.length} SKU Missing</span>
+                        </button>
+                    {/if}
+                </div>
+
+                <!-- 3-Pill Breakdown Comparison -->
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-amber-200/60 dark:border-amber-800/40">
+                    <div class="bg-white/80 dark:bg-slate-900/80 rounded-xl p-3 border border-amber-200 dark:border-amber-900/40">
+                        <span class="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">Total Pencairan File JSON</span>
+                        <div class="text-base font-extrabold text-slate-800 dark:text-slate-100 mt-0.5">
+                            {formatRupiah(fileSuggestedPencairan || (liveTotalSelling + totalMissingAmount))}
+                        </div>
+                        <p class="text-[10px] text-slate-400 mt-0.5">{fileExpectedQty ? `${fileExpectedQty} pcs di file` : 'Semua pesanan di file'}</p>
+                    </div>
+                    <div class="bg-white/80 dark:bg-slate-900/80 rounded-xl p-3 border border-cyan-200 dark:border-cyan-900/40">
+                        <span class="text-[10px] font-bold uppercase tracking-wider text-cyan-600 dark:text-cyan-400">Tercatat Gudang (Masuk Form)</span>
+                        <div class="text-base font-extrabold text-cyan-600 dark:text-cyan-400 mt-0.5">
+                            {formatRupiah(liveTotalSelling)}
+                        </div>
+                        <p class="text-[10px] text-slate-400 mt-0.5">{liveTotalQty} pcs siap potong stok</p>
+                    </div>
+                    <div class="bg-rose-50/90 dark:bg-rose-950/50 rounded-xl p-3 border border-rose-200 dark:border-rose-900/50">
+                        <span class="text-[10px] font-bold uppercase tracking-wider text-rose-600 dark:text-rose-400">Selisih Belum Tercatat</span>
+                        <div class="text-base font-extrabold text-rose-600 dark:text-rose-400 mt-0.5">
+                            -{formatRupiah(Math.abs(filePencairanDiff || totalMissingAmount))}
+                        </div>
+                        <p class="text-[10px] text-rose-600/80 dark:text-rose-400/80 mt-0.5">
+                            {totalMissingPcs} pcs tertahan dari {missingSkusList.length} SKU
+                        </p>
+                    </div>
+                </div>
+            </div>
+        {/if}
+
         <!-- Section 3: Live Metric Cards -->
         <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
             <div
                 class="rounded-2xl bg-white dark:bg-slate-900 p-4 border border-slate-200 dark:border-slate-800 shadow-xs space-y-1"
             >
-                <span
-                    class="text-xs font-bold uppercase tracking-wider text-slate-400"
-                    >Total Qty Out</span
-                >
+                <div class="flex items-center justify-between">
+                    <span
+                        class="text-xs font-bold uppercase tracking-wider text-slate-400"
+                        >Total Qty Out</span
+                    >
+                    {#if totalMissingPcs > 0}
+                        <span class="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300" title="Item belum terdaftar di database">
+                            +{totalMissingPcs} missing
+                        </span>
+                    {/if}
+                </div>
                 <div
                     class="text-xl font-extrabold text-slate-800 dark:text-slate-100"
                 >
                     {liveTotalQty.toLocaleString("id-ID")}
                     <span class="text-xs text-slate-400 font-semibold">pcs</span>
                 </div>
-                <p class="text-[10px] text-slate-400">Total unit barang keluar</p>
+                {#if fileExpectedQty && fileExpectedQty !== liveTotalQty}
+                    <p class="text-[10px] text-slate-500">File: {fileExpectedQty.toLocaleString("id-ID")} pcs (-{fileExpectedQty - liveTotalQty} pcs)</p>
+                {:else}
+                    <p class="text-[10px] text-slate-400">Total unit barang keluar</p>
+                {/if}
             </div>
             <div
                 class="rounded-2xl bg-white dark:bg-slate-900 p-4 border border-slate-200 dark:border-slate-800 shadow-xs space-y-1"
@@ -1633,18 +1762,32 @@
                 <p class="text-[10px] text-slate-400">Σ (HPP Modal × Qty)</p>
             </div>
             <div
-                class="rounded-2xl bg-white dark:bg-slate-900 p-4 border border-slate-200 dark:border-slate-800 shadow-xs space-y-1"
+                class="rounded-2xl bg-white dark:bg-slate-900 p-4 border border-slate-200 dark:border-slate-800 shadow-xs space-y-1 relative overflow-hidden"
             >
-                <span
-                    class="text-xs font-bold uppercase tracking-wider text-cyan-600 dark:text-cyan-400"
-                    >Total Pencairan (Netto)</span
-                >
+                <div class="flex items-center justify-between">
+                    <span
+                        class="text-xs font-bold uppercase tracking-wider text-cyan-600 dark:text-cyan-400"
+                        >Total Pencairan (Netto)</span
+                    >
+                    {#if fileSuggestedPencairan && Math.abs(filePencairanDiff) > 50}
+                        <span class="text-[9px] font-extrabold px-1.5 py-0.5 rounded-full bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300 border border-rose-200 dark:border-rose-800" title="Ada selisih dari file pencairan">
+                            Selisih: -{formatRupiah(Math.abs(filePencairanDiff))}
+                        </span>
+                    {/if}
+                </div>
                 <div
                     class="text-xl font-extrabold text-cyan-600 dark:text-cyan-400 truncate"
                 >
                     {formatRupiah(liveTotalSelling)}
                 </div>
-                <p class="text-[10px] text-slate-400">Pencairan Bersih (Σ Jual × Qty)</p>
+                {#if fileSuggestedPencairan && Math.abs(filePencairanDiff) > 50}
+                    <div class="flex items-center justify-between text-[10px] text-slate-500 pt-1 border-t border-slate-100 dark:border-slate-800">
+                        <span>Pencairan File:</span>
+                        <span class="font-bold text-slate-700 dark:text-slate-300">{formatRupiah(fileSuggestedPencairan)}</span>
+                    </div>
+                {:else}
+                    <p class="text-[10px] text-slate-400">Pencairan Bersih (Σ Jual × Qty)</p>
+                {/if}
             </div>
             <div
                 class="rounded-2xl bg-white dark:bg-slate-900 p-4 border border-slate-200 dark:border-slate-800 shadow-xs space-y-1"
@@ -2339,11 +2482,37 @@
 
         <!-- Sticky Action Footer Bar -->
         <div
-            class="sticky bottom-0 z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-t border-slate-200 dark:border-slate-800 p-4 shadow-2xl rounded-t-2xl"
+            class="sticky bottom-0 z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-t border-slate-200 dark:border-slate-800 shadow-2xl rounded-t-2xl overflow-hidden"
         >
-            <div
-                class="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4"
-            >
+            {#if hasDiscrepancyAlert}
+                <div class="px-5 py-2.5 bg-amber-50 dark:bg-amber-950/60 border-b border-amber-200 dark:border-amber-900/40 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                    <div class="flex items-center gap-2 text-amber-900 dark:text-amber-200 font-bold">
+                        <AlertTriangle class="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 animate-pulse" />
+                        <span>
+                            Peringatan: Ada {missingSkusList.length} SKU ({totalMissingPcs} pcs) senilai {formatRupiah(totalMissingAmount || Math.abs(filePencairanDiff))} belum terdaftar.
+                        </span>
+                        <span class="font-normal text-amber-700 dark:text-amber-300 hidden md:inline">
+                            Transaksi akan disimpan hanya mencatat {liveTotalQty} pcs senilai {formatRupiah(liveTotalSelling)}.
+                        </span>
+                    </div>
+                    {#if missingSkusList.length > 0}
+                        <button
+                            type="button"
+                            onclick={() => {
+                                const el = document.getElementById("section-missing-skus");
+                                if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+                            }}
+                            class="text-amber-700 dark:text-amber-300 font-extrabold underline hover:text-amber-900 dark:hover:text-amber-100 shrink-0 self-start sm:self-auto"
+                        >
+                            Cek {missingSkusList.length} SKU Missing &rarr;
+                        </button>
+                    {/if}
+                </div>
+            {/if}
+            <div class="p-4">
+                <div
+                    class="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4"
+                >
                 <div
                     class="flex flex-wrap items-center gap-3 text-xs font-semibold text-slate-600 dark:text-slate-400"
                 >

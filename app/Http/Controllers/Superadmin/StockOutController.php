@@ -429,6 +429,7 @@ class StockOutController extends Controller
                 }
                 $suggestedBruto = $decoded['bruto'] ?? null;
                 $suggestedPencairan = $decoded['total_pembayaran_kalkulasi'] ?? $decoded['matched_master_amount'] ?? $decoded['total_master_amount'] ?? $decoded['total_payment'] ?? null;
+                $expectedFileQty = $decoded['total_qty_satuan'] ?? $decoded['total_qty_product_ditemukan'] ?? null;
                 if ($suggestedBruto === null && $suggestedPencairan !== null) {
                     $suggestedBruto = $suggestedPencairan;
                 }
@@ -554,7 +555,7 @@ class StockOutController extends Controller
                     }
                     continue;
                 } else {
-                    $this->recordMissingSku($missingSkus, $rawSku, $productName, $variantName, $qty);
+                    $this->recordMissingSku($missingSkus, $rawSku, $productName, $variantName, $qty, null, $paymentAmt, $orderId);
                     continue;
                 }
             }
@@ -581,7 +582,14 @@ class StockOutController extends Controller
             }
 
             // 3. Fallback missing SKU recording
-            $this->recordMissingSku($missingSkus, $rawSku, $productName, $variantName, $qty);
+            $this->recordMissingSku($missingSkus, $rawSku, $productName, $variantName, $qty, null, $paymentAmt, $orderId);
+        }
+
+        $totalMissingAmount = 0;
+        $totalMissingQty = 0;
+        foreach ($missingSkus as $m) {
+            $totalMissingAmount += (float)($m['total_payment'] ?? 0);
+            $totalMissingQty += (int)($m['total_qty'] ?? 0);
         }
 
         return response()->json([
@@ -591,6 +599,9 @@ class StockOutController extends Controller
             'resis' => array_values($resisSet),
             'suggested_bruto' => $suggestedBruto ? (float)$suggestedBruto : null,
             'suggested_pencairan' => $suggestedPencairan ? (float)$suggestedPencairan : null,
+            'expected_file_qty' => isset($expectedFileQty) && $expectedFileQty ? (int)$expectedFileQty : null,
+            'total_missing_amount' => (float)round($totalMissingAmount, 2),
+            'total_missing_qty' => (int)$totalMissingQty,
         ]);
     }
 
@@ -644,7 +655,7 @@ class StockOutController extends Controller
     }
 
     /**
-     * Record missing SKU with aggregated sizes, variations, and quantities
+     * Record missing SKU with aggregated sizes, variations, quantities, and payments
      */
     private function recordMissingSku(
         array &$missingSkus,
@@ -652,7 +663,9 @@ class StockOutController extends Controller
         string $productName,
         string $variantName,
         int $qty = 1,
-        ?string $missingPart = null
+        ?string $missingPart = null,
+        float $payment = 0,
+        ?string $orderId = null
     ): void {
         $skuKey = strtoupper(trim($rawSku));
         if (!$skuKey) return;
@@ -664,7 +677,9 @@ class StockOutController extends Controller
                 'variations' => [],
                 'sizes' => [],
                 'total_qty' => 0,
+                'total_payment' => 0,
                 'order_count' => 0,
+                'orders' => [],
                 'missing_parts' => [],
             ];
         }
@@ -675,6 +690,10 @@ class StockOutController extends Controller
 
         if ($variantName && !in_array($variantName, $missingSkus[$skuKey]['variations'])) {
             $missingSkus[$skuKey]['variations'][] = $variantName;
+        }
+
+        if ($orderId && !in_array($orderId, $missingSkus[$skuKey]['orders'])) {
+            $missingSkus[$skuKey]['orders'][] = $orderId;
         }
 
         $detectedSizes = $this->extractSizesFromText($variantName, $rawSku);
@@ -689,6 +708,7 @@ class StockOutController extends Controller
         }
 
         $missingSkus[$skuKey]['total_qty'] += $qty;
+        $missingSkus[$skuKey]['total_payment'] += $payment;
         $missingSkus[$skuKey]['order_count'] += 1;
 
         // Legacy compatibility fields
@@ -737,10 +757,15 @@ class StockOutController extends Controller
             $prefix1 = $cleanSku . '-';
             $prefix2 = $noSpaceSku . '-';
             foreach ($skuMap as $dbSku => $variant) {
-                $vSize = strtoupper($variant->size);
-                if ((str_starts_with($dbSku, $prefix1) || str_starts_with($dbSku, $prefix2)) && 
-                    ($vSize === $size || ($size === 'XXL' && $vSize === '2XL') || ($size === '2XL' && $vSize === 'XXL'))) {
-                    return $variant;
+                $vSize = strtoupper(trim((string)$variant->size));
+                $sizeMatched = ($vSize === $size || ($size === 'XXL' && $vSize === '2XL') || ($size === '2XL' && $vSize === 'XXL'));
+                if ($sizeMatched) {
+                    if (str_starts_with($dbSku, $prefix1) || str_starts_with($dbSku, $prefix2) || str_starts_with($dbSku, $cleanSku . $size) || str_starts_with($dbSku, $noSpaceSku . $size)) {
+                        return $variant;
+                    }
+                    if (preg_match('/^' . preg_quote($cleanSku, '/') . '(?![0-9])/i', $dbSku) && str_contains($dbSku, $size)) {
+                        return $variant;
+                    }
                 }
             }
         }
