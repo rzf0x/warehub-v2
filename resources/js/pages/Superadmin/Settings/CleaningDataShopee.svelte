@@ -37,6 +37,7 @@
     );
     let searchFilter = $state<string>("");
     let exportFileName = $state<string>("baban_cleaned");
+    let gmvAdsInput = $state<string>("");
 
     // Specification Metrics Payload
     let exportPayload = $state({
@@ -49,6 +50,8 @@
         total_qty_product_ditemukan: 0,
         total_qty_satuan: 0,
         total_pesanan_ditemukan: 0,
+        total_gmv_ads_amount: 0,
+        master_gross_amount: 0,
         bruto: 0,
         data: [] as Array<{
             "No. Pesanan": string;
@@ -106,6 +109,17 @@
 
     function extractMasterOrderId(row: Record<string, any>): string | null {
         const ORDER_ID_REGEX = /^[A-Z0-9_\-]{8,25}$/i;
+        const ignoreValues = [
+            "NO. PESANAN",
+            "ORDER ID",
+            "ORDER_ID",
+            "NO PESANAN",
+            "NOMOR PESANAN",
+            "LIHAT BERDASARKAN",
+            "TOTAL PENGHASILAN",
+            "TOTAL_PENGHASILAN",
+        ];
+
         const priorityKeys = [
             "Dari",
             "Column3",
@@ -118,6 +132,7 @@
         for (const k of priorityKeys) {
             if (row[k] !== undefined && row[k] !== null) {
                 const val = String(row[k]).trim();
+                if (ignoreValues.includes(val.toUpperCase())) continue;
                 if (ORDER_ID_REGEX.test(val)) {
                     return val.toUpperCase();
                 }
@@ -127,6 +142,7 @@
         for (const k of Object.keys(row)) {
             if (row[k] === null || row[k] === undefined) continue;
             const val = String(row[k]).trim();
+            if (ignoreValues.includes(val.toUpperCase())) continue;
             if (ORDER_ID_REGEX.test(val) && isNaN(Number(val))) {
                 return val.toUpperCase();
             }
@@ -259,9 +275,15 @@
 
         let hasValidOrderId = false;
         for (const row of unwrapped) {
-            if (row && typeof row === "object" && extractMasterOrderId(row)) {
-                hasValidOrderId = true;
-                break;
+            if (row && typeof row === "object") {
+                if (row["Column2"] !== undefined && String(row["Column2"]).trim().toUpperCase() !== "ORDER") {
+                    continue;
+                }
+                const oId = extractMasterOrderId(row);
+                if (oId && !["NO. PESANAN", "ORDER ID"].includes(oId.toUpperCase())) {
+                    hasValidOrderId = true;
+                    break;
+                }
             }
         }
 
@@ -394,6 +416,7 @@
         masterJsonData = [];
         rawFileNames = [];
         rawJsonsData = [];
+        gmvAdsInput = "";
         exportPayload = {
             total_order_ids_master: 0,
             total_master_amount: 0,
@@ -404,6 +427,8 @@
             total_qty_product_ditemukan: 0,
             total_qty_satuan: 0,
             total_pesanan_ditemukan: 0,
+            total_gmv_ads_amount: 0,
+            master_gross_amount: 0,
             bruto: 0,
             data: [],
         };
@@ -433,13 +458,23 @@
 
             // 2. Map Master Data Orders & Accumulated Nominals
             const masterMapping: Record<string, number> = {};
-            let totalMasterAmt = 0;
+            let totalMasterGrossAmt = 0;
 
             masterJsonData.forEach((row) => {
                 if (!row || typeof row !== "object") return;
 
+                // STRICT: In Shopee Penghasilan, Column2 must be 'ORDER' if present
+                if (row["Column2"] !== undefined && String(row["Column2"]).trim().toUpperCase() !== "ORDER") {
+                    return;
+                }
+
                 const orderId = extractMasterOrderId(row);
                 if (!orderId) return;
+
+                const upper = orderId.toUpperCase();
+                if (upper === "NO. PESANAN" || upper === "ORDER ID" || upper === "ORDER_ID" || upper === "LIHAT BERDASARKAN" || upper === "TOTAL PENGHASILAN") {
+                    return;
+                }
 
                 const amt = extractMasterAmount(row);
 
@@ -447,10 +482,33 @@
                     masterMapping[orderId] = 0;
                 }
                 masterMapping[orderId] += amt;
-                totalMasterAmt += amt;
+                totalMasterGrossAmt += amt;
             });
 
             const totalOrderIdsMasterCount = Object.keys(masterMapping).length;
+
+            // Calculate GMV Ads & Net Settlement
+            const gmvAds = parseNum(gmvAdsInput);
+            const netPencairan = Math.max(0, totalMasterGrossAmt - gmvAds);
+
+            // Scale Master Mapping if GMV Ads > 0
+            const scaledMasterMapping: Record<string, number> = {};
+            if (gmvAds > 0 && totalMasterGrossAmt > 0) {
+                const ratio = netPencairan / totalMasterGrossAmt;
+                let runningScaled = 0;
+                const oids = Object.keys(masterMapping);
+                oids.forEach((oid, idx) => {
+                    if (idx === oids.length - 1) {
+                        scaledMasterMapping[oid] = netPencairan - runningScaled;
+                    } else {
+                        const sAlloc = Math.round(masterMapping[oid] * ratio);
+                        scaledMasterMapping[oid] = sAlloc;
+                        runningScaled += sAlloc;
+                    }
+                });
+            } else {
+                Object.assign(scaledMasterMapping, masterMapping);
+            }
 
             processProgress = 55;
 
@@ -483,7 +541,7 @@
                 dedupSet.add(dedupKey);
 
                 // Check if Order ID exists in Master
-                if (masterMapping[orderId] === undefined) return;
+                if (scaledMasterMapping[orderId] === undefined) return;
 
                 if (!orderRawItemsMap[orderId]) {
                     orderRawItemsMap[orderId] = [];
@@ -509,7 +567,7 @@
 
             Object.keys(orderRawItemsMap).forEach((orderId) => {
                 const rawItems = orderRawItemsMap[orderId];
-                const masterAmt = masterMapping[orderId] || 0;
+                const masterAmt = scaledMasterMapping[orderId] || 0;
                 const itemCount = rawItems.length;
 
                 // Hitung total raw payment per item untuk rasio pembagian
@@ -639,11 +697,11 @@
 
             // 4. Missing Order IDs
             const missingList: Array<{ order_id: string; amount: number }> = [];
-            Object.keys(masterMapping).forEach((orderId) => {
+            Object.keys(scaledMasterMapping).forEach((orderId) => {
                 if (matchedOrdersMap[orderId] === undefined) {
                     missingList.push({
                         order_id: orderId,
-                        amount: masterMapping[orderId],
+                        amount: scaledMasterMapping[orderId],
                     });
                 }
             });
@@ -660,8 +718,10 @@
             // Update Target Export Payload
             exportPayload = {
                 total_order_ids_master: totalOrderIdsMasterCount,
-                total_master_amount: Math.round(totalMasterAmt),
+                total_master_amount: Math.round(netPencairan),
                 matched_master_amount: Math.round(matchedMasterAmountSum),
+                total_gmv_ads_amount: Math.round(gmvAds),
+                master_gross_amount: Math.round(totalMasterGrossAmt),
                 total_data_cocok: matchedDataItems.length,
                 total_pembayaran_kalkulasi: Math.round(
                     totalPembayaranKalkulasiSum,
@@ -951,6 +1011,39 @@
             </div>
         </div>
 
+        <!-- GMV Ads / Biaya Iklan Shopee Config Bar -->
+        <div
+            class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm flex flex-col md:flex-row items-center justify-between gap-4"
+        >
+            <div class="flex items-center gap-3.5">
+                <div class="p-3 rounded-xl bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400">
+                    <DollarSign class="w-5 h-5" />
+                </div>
+                <div>
+                    <h4 class="font-bold text-slate-800 dark:text-slate-100 text-sm flex items-center gap-2">
+                        GMV Ads / Biaya Iklan Shopee (Opsional)
+                        <span class="text-[10px] uppercase font-extrabold px-2 py-0.5 bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 rounded-full">
+                            Pemisah Iklan
+                        </span>
+                    </h4>
+                    <p class="text-xs text-slate-400 mt-0.5">
+                        Masukkan nominal biaya iklan Shopee (misal <span class="font-bold text-indigo-600 dark:text-indigo-400">1.082.250</span>) untuk dikurangkan dari pencairan bruto master menjadi pencairan bersih.
+                    </p>
+                </div>
+            </div>
+            <div class="w-full md:w-72">
+                <div class="relative">
+                    <span class="absolute left-3.5 top-2.5 text-xs font-bold text-slate-400">Rp</span>
+                    <input
+                        type="text"
+                        bind:value={gmvAdsInput}
+                        placeholder="Contoh: 1.082.250"
+                        class="w-full pl-10 pr-3 py-2.5 border border-slate-200 dark:border-slate-800 rounded-xl bg-slate-50 dark:bg-slate-950 text-xs font-bold text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500 transition-all"
+                    />
+                </div>
+            </div>
+        </div>
+
         <!-- Action & Export Control Bar -->
         <div
             class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm flex flex-col lg:flex-row items-center justify-between gap-4"
@@ -1038,6 +1131,9 @@
                             Total Pembayaran Hasil Kalkulasi: <span class="font-black text-emerald-600 dark:text-emerald-400">{formatRupiah(exportPayload.total_pembayaran_kalkulasi)}</span>
                             &nbsp;•&nbsp;
                             Matched Master Pencairan: <span class="font-black">{formatRupiah(exportPayload.matched_master_amount)}</span>
+                            {#if exportPayload.total_gmv_ads_amount > 0}
+                                &nbsp;•&nbsp; GMV Ads/Iklan: <span class="font-black text-indigo-600 dark:text-indigo-400">{formatRupiah(exportPayload.total_gmv_ads_amount)}</span>
+                            {/if}
                         </p>
                     </div>
                 </div>
@@ -1062,7 +1158,7 @@
 
         <!-- Target Metric Cards -->
         <div
-            class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4"
+            class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-4"
         >
             <div
                 class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-4 rounded-2xl shadow-xs space-y-1"
@@ -1120,6 +1216,44 @@
                     {:else}
                         <span>Kalkulasi Hasil Data</span>
                     {/if}
+                </div>
+            </div>
+
+            <div
+                class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-4 rounded-2xl shadow-xs space-y-1"
+            >
+                <span
+                    class="text-[11px] font-bold uppercase tracking-wider text-slate-400"
+                    >GMV Ads / Iklan</span
+                >
+                <div
+                    class="text-base font-black text-indigo-600 dark:text-indigo-400"
+                >
+                    {formatRupiah(exportPayload.total_gmv_ads_amount)}
+                </div>
+                <div class="text-[11px] font-semibold text-slate-500">
+                    {#if exportPayload.total_gmv_ads_amount > 0}
+                        Dipisah Otomatis
+                    {:else}
+                        Tanpa Potongan Iklan
+                    {/if}
+                </div>
+            </div>
+
+            <div
+                class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-4 rounded-2xl shadow-xs space-y-1"
+            >
+                <span
+                    class="text-[11px] font-bold uppercase tracking-wider text-slate-400"
+                    >Data Cocok</span
+                >
+                <div
+                    class="text-xl font-black text-teal-600 dark:text-teal-400"
+                >
+                    {exportPayload.total_data_cocok}
+                </div>
+                <div class="text-[11px] font-semibold text-teal-600 dark:text-teal-400">
+                    Item Pesanan
                 </div>
             </div>
 

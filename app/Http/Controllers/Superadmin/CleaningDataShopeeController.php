@@ -21,6 +21,7 @@ class CleaningDataShopeeController extends Controller
         $request->validate([
             'master_json' => 'nullable',
             'raw_jsons' => 'nullable|array',
+            'gmv_ads' => 'nullable',
         ]);
 
         $masterRaw = $request->input('master_json');
@@ -48,17 +49,23 @@ class CleaningDataShopeeController extends Controller
             }
         }
 
-        // 1. Ekstraksi Bruto dari Summary Master Data
+        // 1. Ekstraksi Bruto dari Summary Master Data & GMV Ads
         $bruto = $this->extractBruto($masterRaw);
+        $gmvAds = $this->parseNum($request->input('gmv_ads', 0));
 
         // 2. Unwrap & Process Master Data
         $masterRows = $this->unwrapDataArray($masterRaw, ['Income', 'Penghasilan', 'orders', 'data', 'items', 'rows']);
         
         $masterMapping = [];
-        $totalMasterAmount = 0;
+        $totalMasterGrossAmount = 0;
 
         foreach ($masterRows as $row) {
             if (!is_array($row)) continue;
+
+            // STRICT: Hanya proses baris bertipe ORDER jika ada Column2 (format Shopee Penghasilan)
+            if (isset($row['Column2']) && strtoupper(trim((string)$row['Column2'])) !== 'ORDER') {
+                continue;
+            }
             
             $orderId = $this->extractMasterOrderId($row);
             if (!$orderId) continue;
@@ -69,10 +76,31 @@ class CleaningDataShopeeController extends Controller
                 $masterMapping[$orderId] = 0;
             }
             $masterMapping[$orderId] += $amt;
-            $totalMasterAmount += $amt;
+            $totalMasterGrossAmount += $amt;
         }
 
         $totalOrderIdsMaster = count($masterMapping);
+        $netPencairan = max(0, $totalMasterGrossAmount - $gmvAds);
+
+        // Skala nominal master jika ada potongan GMV Ads/Iklan
+        $scaledMasterMapping = [];
+        if ($gmvAds > 0 && $totalMasterGrossAmount > 0) {
+            $ratio = $netPencairan / $totalMasterGrossAmount;
+            $runningScaled = 0;
+            $oids = array_keys($masterMapping);
+            $totalCount = count($oids);
+            foreach ($oids as $idx => $oid) {
+                if ($idx === $totalCount - 1) {
+                    $sAlloc = $netPencairan - $runningScaled;
+                } else {
+                    $sAlloc = (int)round($masterMapping[$oid] * $ratio);
+                }
+                $scaledMasterMapping[$oid] = $sAlloc;
+                $runningScaled += $sAlloc;
+            }
+        } else {
+            $scaledMasterMapping = $masterMapping;
+        }
 
         // 3. Process Raw Shopee Data
         $dedupSet = [];
@@ -97,8 +125,8 @@ class CleaningDataShopeeController extends Controller
                 if (isset($dedupSet[$dedupKey])) continue;
                 $dedupSet[$dedupKey] = true;
 
-                // Cek jika Order ID ditemukan di masterMapping
-                if (!isset($masterMapping[$orderId])) continue;
+                // Cek jika Order ID ditemukan di scaledMasterMapping
+                if (!isset($scaledMasterMapping[$orderId])) continue;
 
                 if (!isset($orderRawItemsMap[$orderId])) {
                     $orderRawItemsMap[$orderId] = [];
@@ -116,7 +144,7 @@ class CleaningDataShopeeController extends Controller
         $totalQtySatuan = 0;
 
         foreach ($orderRawItemsMap as $orderId => $rawItems) {
-            $masterAmt = $masterMapping[$orderId] ?? 0;
+            $masterAmt = $scaledMasterMapping[$orderId] ?? 0;
             $itemCount = count($rawItems);
 
             // Hitung total raw payment per item untuk rasio pembagian
@@ -219,7 +247,7 @@ class CleaningDataShopeeController extends Controller
 
         // Missing Order IDs
         $missingOrderIds = [];
-        foreach ($masterMapping as $orderId => $amt) {
+        foreach ($scaledMasterMapping as $orderId => $amt) {
             if (!isset($matchedOrdersMap[$orderId])) {
                 $missingOrderIds[] = [
                     'order_id' => $orderId,
@@ -236,8 +264,10 @@ class CleaningDataShopeeController extends Controller
             'success' => true,
             'export_payload' => [
                 'total_order_ids_master' => $totalOrderIdsMaster,
-                'total_master_amount' => round($totalMasterAmount),
+                'total_master_amount' => round($netPencairan),
                 'matched_master_amount' => round($matchedMasterAmount),
+                'total_gmv_ads_amount' => round($gmvAds),
+                'master_gross_amount' => round($totalMasterGrossAmount),
                 'total_data_cocok' => $totalDataCocok,
                 'total_pembayaran_kalkulasi' => round($totalPembayaranKalkulasi),
                 'total_produk_ditemukan' => $totalProdukDitemukan,
@@ -285,11 +315,13 @@ class CleaningDataShopeeController extends Controller
     private function extractMasterOrderId(array $row): ?string
     {
         $ORDER_ID_REGEX = '/^[A-Z0-9_\-]{8,25}$/i';
+        $ignoreValues = ['NO. PESANAN', 'ORDER ID', 'ORDER_ID', 'NO PESANAN', 'NOMOR PESANAN', 'LIHAT BERDASARKAN', 'TOTAL PENGHASILAN', 'TOTAL_PENGHASILAN'];
 
         $priorityKeys = ['Dari', 'Column3', 'No. Pesanan', 'Order/Adjustment ID', 'order_id', 'Order ID'];
         foreach ($priorityKeys as $k) {
             if (isset($row[$k])) {
                 $val = trim((string)$row[$k]);
+                if (in_array(strtoupper($val), $ignoreValues)) continue;
                 if (preg_match($ORDER_ID_REGEX, $val)) {
                     return strtoupper($val);
                 }
@@ -299,6 +331,7 @@ class CleaningDataShopeeController extends Controller
         foreach ($row as $k => $v) {
             if (is_array($v)) continue;
             $val = trim((string)$v);
+            if (in_array(strtoupper($val), $ignoreValues)) continue;
             if (preg_match($ORDER_ID_REGEX, $val) && !is_numeric($val)) {
                 return strtoupper($val);
             }

@@ -37,7 +37,8 @@ class StockOutController extends Controller
             ->when($search, function ($query, $s) {
                 $query->where(function ($q) use ($s) {
                     $q->where('resi_summary', 'like', "%{$s}%")
-                      ->orWhere('note', 'like', "%{$s}%");
+                      ->orWhere('note', 'like', "%{$s}%")
+                      ->orWhereHas('store', fn($sq) => $sq->where('store_name', 'like', "%{$s}%"));
                 });
             })
             ->when($warehouseId, fn($q) => $q->where('warehouse_id', $warehouseId))
@@ -46,27 +47,31 @@ class StockOutController extends Controller
             ->when($userId, fn($q) => $q->where('user_id', $userId));
 
         $stockOuts = (clone $baseQuery)
-            ->with(['warehouse', 'user', 'store.seller', 'period', 'items.productVariant.product.seller'])
+            ->select('id', 'warehouse_id', 'user_id', 'store_id', 'period_id', 'date', 'note', 'total_amount', 'total_selling_price', 'bruto')
+            ->with([
+                'warehouse:id,name',
+                'user:id,name',
+                'store:id,store_name,seller_id',
+                'store.seller:id,seller_name',
+                'period:id,name',
+            ])
+            ->withSum('items', 'qty')
             ->latest()
             ->paginate(10)
             ->withQueryString();
 
-        $filteredIds = (clone $baseQuery)->pluck('id');
+        $aggregates = (clone $baseQuery)->selectRaw('
+            COALESCE(SUM(total_amount), 0) as total_hpp,
+            COALESCE(SUM(bruto), 0) as total_bruto,
+            COALESCE(SUM(total_selling_price), 0) as penjualan_bersih
+        ')->first();
 
-        $totalQty = StockOutItem::whereIn('stock_out_id', $filteredIds)->sum('qty');
-
-        $totalHpp = (clone $baseQuery)->sum('total_amount');
-        if ($totalHpp == 0) {
-            $totalHpp = StockOutItem::whereIn('stock_out_id', $filteredIds)->sum(DB::raw('qty * price'));
-        }
-
-        $totalBruto = (clone $baseQuery)->sum('bruto');
-        if ($totalBruto == 0) {
-            $totalBruto = (clone $baseQuery)->sum('total_selling_price');
-        }
-
-        $penjualanBersih = (clone $baseQuery)->sum('total_selling_price');
+        $totalHpp = (float)($aggregates->total_hpp ?? 0);
+        $totalBruto = (float)($aggregates->total_bruto ?? 0);
+        $penjualanBersih = (float)($aggregates->penjualan_bersih ?? 0);
         $estimasiKeuntungan = $penjualanBersih - $totalHpp;
+
+        $totalQty = (int)StockOutItem::whereIn('stock_out_id', (clone $baseQuery)->select('id'))->sum('qty');
 
         $warehouses = Warehouse::select('id', 'name')->get();
         $stores = Store::select('id', 'store_name')->get();
@@ -96,20 +101,38 @@ class StockOutController extends Controller
         ]);
     }
 
-    public function create()
+    public function searchVariants(Request $request)
     {
-        $activePeriod = Period::where('is_active', true)->first();
-        $warehouses = Warehouse::select('id', 'name')->get();
-        $stores = Store::with('seller:id,seller_name')->select('id', 'seller_id', 'store_name', 'marketplace')->get();
-        $periods = Period::select('id', 'name', 'is_active')->latest()->get();
-        $sellers = Seller::select('id', 'seller_name')->get();
-        $konveksis = Konveksi::select('id', 'name')->get();
-        $categories = Category::select('id', 'name')->get();
-        $brands = Brand::select('id', 'name')->get();
-        $templates = VariantTemplate::with('items')->select('id', 'template_name')->get();
+        $q = trim((string)$request->input('q', ''));
+        $sellerId = $request->input('seller_id');
+        $warehouseId = $request->input('warehouse_id');
 
-        $variants = ProductVariant::with(['product.seller', 'stocks'])
-            ->select('id', 'product_id', 'sku', 'size', 'color', 'price')
+        $query = ProductVariant::with([
+            'product.seller:id,seller_name',
+            'stocks'
+        ])
+        ->select('id', 'product_id', 'sku', 'size', 'color', 'price');
+
+        if ($sellerId) {
+            $query->whereHas('product', function ($pq) use ($sellerId) {
+                $pq->where('seller_id', $sellerId);
+            });
+        }
+
+        if ($q !== '') {
+            $query->where(function ($subQ) use ($q) {
+                $subQ->where('sku', 'like', "%{$q}%")
+                    ->orWhere('size', 'like', "%{$q}%")
+                    ->orWhere('color', 'like', "%{$q}%")
+                    ->orWhereHas('product', function ($pq) use ($q) {
+                        $pq->where('product_name', 'like', "%{$q}%")
+                            ->orWhere('sku', 'like', "%{$q}%");
+                    });
+            });
+        }
+
+        $variants = $query->latest('id')
+            ->limit(30)
             ->get()
             ->map(function ($v) {
                 return [
@@ -127,6 +150,21 @@ class StockOutController extends Controller
                 ];
             });
 
+        return response()->json($variants);
+    }
+
+    public function create()
+    {
+        $activePeriod = Period::where('is_active', true)->first();
+        $warehouses = Warehouse::select('id', 'name')->get();
+        $stores = Store::with('seller:id,seller_name')->select('id', 'seller_id', 'store_name', 'marketplace')->get();
+        $periods = Period::select('id', 'name', 'is_active')->latest()->get();
+        $sellers = Seller::select('id', 'seller_name')->get();
+        $konveksis = Konveksi::select('id', 'name')->get();
+        $categories = Category::select('id', 'name')->get();
+        $brands = Brand::select('id', 'name')->get();
+        $templates = VariantTemplate::with('items')->select('id', 'template_name')->get();
+
         return Inertia::render('Superadmin/Warehouse/StockOut/StockOutForm', [
             'warehouses' => $warehouses,
             'stores' => $stores,
@@ -136,7 +174,7 @@ class StockOutController extends Controller
             'categories' => $categories,
             'brands' => $brands,
             'templates' => $templates,
-            'variants' => $variants,
+            'variants' => [],
             'activePeriod' => $activePeriod,
             'stockOut' => null,
             'isEdit' => false,
@@ -157,7 +195,9 @@ class StockOutController extends Controller
         $brands = Brand::select('id', 'name')->get();
         $templates = VariantTemplate::with('items')->select('id', 'template_name')->get();
 
-        $variants = ProductVariant::with(['product.seller', 'stocks'])
+        $variantIds = $stockOut->items->pluck('product_variant_id')->filter()->unique();
+        $variants = ProductVariant::with(['product.seller:id,seller_name', 'stocks'])
+            ->whereIn('id', $variantIds)
             ->select('id', 'product_id', 'sku', 'size', 'color', 'price')
             ->get()
             ->map(function ($v) {
@@ -395,19 +435,42 @@ class StockOutController extends Controller
 
             if (!$rawSku) continue;
 
-            // 1. Check if rawSku is a multi-component bundle (e.g. SK04-SK03-SK02 or BKA42-BKA43-BKA46-BKA47)
-            $parts = preg_split('/[\+,\,]+/', $rawSku);
+            // 1. Check if rawSku is a multi-component bundle (e.g. SK04-SK03-SK02 or BKA 44,47,50,60)
+            $parts = preg_split('/[\+,\,\/\&]+/', $rawSku);
             if (count($parts) === 1 && preg_match('/^([A-Z0-9\s]+)-([A-Z0-9\s]+)/i', $rawSku)) {
                 $parts = explode('-', $rawSku);
             }
             $parts = array_filter(array_map('trim', $parts));
 
             if (count($parts) > 1) {
+                // Generic prefix extractor for ANY brand:
+                // Examples: "BKA 44" -> "BKA ", "3SECOND 01" -> "3SECOND ", "SK-01" -> "SK-", "POLO 10" -> "POLO "
+                $firstPart = reset($parts);
+                $prefix = '';
+                if (preg_match('/^(.*?\D+)\d+$/', $firstPart, $pm)) {
+                    $prefix = $pm[1];
+                } elseif (preg_match('/^([A-Za-z0-9\-_]+[\s\-_]+)/', $firstPart, $pm)) {
+                    $prefix = $pm[1];
+                }
+
                 $subMatched = [];
                 $hasMissing = false;
 
-                foreach ($parts as $part) {
-                    $partV = $this->resolveVariantFromSkuAndSize($part, $variantName, $rawSku, $skuMap);
+                foreach ($parts as $idx => $part) {
+                    $testPart = $part;
+                    $partV = $this->resolveVariantFromSkuAndSize($testPart, $variantName, $rawSku, $skuMap);
+
+                    // If not resolved and subsequent part is just number/short code, try with prefix
+                    if (!$partV && $idx > 0 && $prefix && !preg_match('/^[A-Za-z]/', $part)) {
+                        $pTrim = rtrim($prefix);
+                        $testPart = $pTrim . ' ' . $part;
+                        $partV = $this->resolveVariantFromSkuAndSize($testPart, $variantName, $rawSku, $skuMap);
+                        if (!$partV) {
+                            $testPart = rtrim($prefix, " \t\n\r\0\x0B-_") . $part;
+                            $partV = $this->resolveVariantFromSkuAndSize($testPart, $variantName, $rawSku, $skuMap);
+                        }
+                    }
+
                     if ($partV) {
                         $stk = $warehouseId ? ($partV->stocks->firstWhere('warehouse_id', $warehouseId)->qty ?? 0) : ($partV->stocks->sum('qty') ?? 0);
                         $subMatched[] = [
@@ -425,18 +488,21 @@ class StockOutController extends Controller
                         ];
                     } else {
                         $hasMissing = true;
-                        $missingSkus[$part] = [
-                            'sku' => $part,
-                            'product_name' => $productName,
-                            'variation' => $variantName,
-                        ];
                     }
                 }
 
-                if (!$hasMissing && count($subMatched) > 0) {
+                if (!$hasMissing && count($subMatched) === count($parts)) {
                     foreach ($subMatched as $sm) {
                         $matchedItems[] = $sm;
                     }
+                    continue;
+                } else {
+                    // Record the whole rawSku as missing so user can easily search and edit the JSON
+                    $missingSkus[strtoupper($rawSku)] = [
+                        'sku' => $rawSku,
+                        'product_name' => $productName,
+                        'variation' => $variantName,
+                    ];
                     continue;
                 }
             }
@@ -620,6 +686,101 @@ class StockOutController extends Controller
             'success' => true,
             'message' => count($createdVariants) . ' Varian Produk berhasil dibuat otomatis!',
             'created_variants' => $createdVariants,
+        ]);
+    }
+
+    public function quickAdjustStock(Request $request)
+    {
+        $validated = $request->validate([
+            'warehouse_id' => ['required', 'exists:warehouses,id'],
+            'variant_id' => ['required', 'exists:product_variants,id'],
+            'add_qty' => ['required', 'integer', 'min:1'],
+            'note' => ['nullable', 'string', 'max:255'],
+        ]);
+
+        $warehouseId = (int)$validated['warehouse_id'];
+        $variantId = (int)$validated['variant_id'];
+        $addQty = (int)$validated['add_qty'];
+        $note = $validated['note'] ?? 'Penyesuaian stok manual dari form Stock Out';
+
+        $newStockQty = 0;
+
+        DB::transaction(function () use ($warehouseId, $variantId, $addQty, $note, &$newStockQty) {
+            $stockRecord = Stock::firstOrCreate(
+                ['warehouse_id' => $warehouseId, 'product_variant_id' => $variantId],
+                ['qty' => 0, 'allocated_qty' => 0]
+            );
+
+            $qtyBefore = (int)$stockRecord->qty;
+            $stockRecord->increment('qty', $addQty);
+            $newStockQty = (int)$stockRecord->fresh()->qty;
+
+            StockLog::create([
+                'product_variant_id' => $variantId,
+                'warehouse_id' => $warehouseId,
+                'reference_type' => StockOut::class,
+                'reference_id' => null,
+                'qty_before' => $qtyBefore,
+                'qty_change' => $addQty,
+                'qty_after' => $newStockQty,
+                'note' => $note,
+            ]);
+        });
+
+        return response()->json([
+            'success' => true,
+            'message' => "Berhasil menambahkan {$addQty} pcs stok ke gudang.",
+            'new_stock' => $newStockQty,
+            'variant_id' => $variantId,
+        ]);
+    }
+
+    public function quickAdjustStockBulk(Request $request)
+    {
+        $validated = $request->validate([
+            'warehouse_id' => ['required', 'exists:warehouses,id'],
+            'items' => ['required', 'array', 'min:1'],
+            'items.*.variant_id' => ['required', 'exists:product_variants,id'],
+            'items.*.add_qty' => ['required', 'integer', 'min:1'],
+        ]);
+
+        $warehouseId = (int)$validated['warehouse_id'];
+        $items = $validated['items'];
+        $updatedList = [];
+
+        DB::transaction(function () use ($warehouseId, $items, &$updatedList) {
+            foreach ($items as $item) {
+                $variantId = (int)$item['variant_id'];
+                $addQty = (int)$item['add_qty'];
+
+                $stockRecord = Stock::firstOrCreate(
+                    ['warehouse_id' => $warehouseId, 'product_variant_id' => $variantId],
+                    ['qty' => 0, 'allocated_qty' => 0]
+                );
+
+                $qtyBefore = (int)$stockRecord->qty;
+                $stockRecord->increment('qty', $addQty);
+                $newStockQty = (int)$stockRecord->fresh()->qty;
+
+                StockLog::create([
+                    'product_variant_id' => $variantId,
+                    'warehouse_id' => $warehouseId,
+                    'reference_type' => StockOut::class,
+                    'reference_id' => null,
+                    'qty_before' => $qtyBefore,
+                    'qty_change' => $addQty,
+                    'qty_after' => $newStockQty,
+                    'note' => 'Penyesuaian stok massal dari form Stock Out',
+                ]);
+
+                $updatedList[$variantId] = $newStockQty;
+            }
+        });
+
+        return response()->json([
+            'success' => true,
+            'message' => "Berhasil menambahkan stok untuk " . count($items) . " produk ke gudang.",
+            'updated_stocks' => $updatedList,
         ]);
     }
 

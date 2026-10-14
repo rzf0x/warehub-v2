@@ -19,6 +19,13 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->encryptCookies(except: ['appearance', 'sidebar_state']);
 
+        $middleware->validateCsrfTokens(except: [
+            'superadmin/warehouse/stock-out/quick-adjust-stock',
+            'superadmin/warehouse/stock-out/quick-adjust-stock-bulk',
+            'superadmin/warehouse/stock-out/import-chunked',
+            'superadmin/warehouse/stock-out/quick-create-products',
+        ]);
+
         $middleware->web(append: [
             HandleAppearance::class,
             HandleInertiaRequests::class,

@@ -34,6 +34,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::prefix('superadmin')->name('superadmin.')->group(function () {
         // Dashboard Superadmin
         Route::get('/dashboard', [DashboardController::class, 'index'])->name('dashboard');
+        Route::get('/maintenance-preview', fn() => response()->view('errors.503', [], 503))->name('maintenance.preview');
 
         // User Management Routes
         Route::prefix('user-management')->name('user-management.')->group(function () {
@@ -93,9 +94,12 @@ Route::middleware(['auth', 'verified'])->group(function () {
             Route::get('stock-out/chart', [StockOutController::class, 'chart'])->name('stock-out.chart');
             Route::get('stock-out/settlement', [StockOutController::class, 'settlement'])->name('stock-out.settlement');
             Route::get('stock-out/seller-detail/{seller}', [StockOutController::class, 'sellerDetail'])->name('stock-out.seller-detail');
+            Route::get('stock-out/search-variants', [StockOutController::class, 'searchVariants'])->name('stock-out.search-variants');
             Route::get('stock-out/{stockOut}/pdf', [StockOutController::class, 'streamSuratJalan'])->name('stock-out.pdf');
             Route::post('stock-out/import-chunked', [StockOutController::class, 'importChunked'])->name('stock-out.import-chunked');
             Route::post('stock-out/quick-create-products', [StockOutController::class, 'quickCreateProducts'])->name('stock-out.quick-create-products');
+            Route::post('stock-out/quick-adjust-stock', [StockOutController::class, 'quickAdjustStock'])->name('stock-out.quick-adjust-stock');
+            Route::post('stock-out/quick-adjust-stock-bulk', [StockOutController::class, 'quickAdjustStockBulk'])->name('stock-out.quick-adjust-stock-bulk');
             Route::resource('stock-out', StockOutController::class)->except(['show']);
 
             // Stock Opname

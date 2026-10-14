@@ -23,17 +23,18 @@
 
     interface StockOutRecord {
         id: number;
-        resi_summary: string;
+        resi_summary?: string;
         date: string;
         note: string | null;
         total_amount?: number;
         total_selling_price: number;
         bruto?: number;
+        items_sum_qty?: number;
         warehouse?: { id: number; name: string };
-        store?: { id: number; store_name: string; seller?: { id: number; name: string } };
+        store?: { id: number; store_name: string; seller?: { id: number; seller_name?: string; name?: string } };
         period?: { id: number; name: string };
         user?: { id: number; name: string };
-        items: Item[];
+        items?: Item[];
     }
 
     let {
@@ -119,6 +120,9 @@
     }
 
     function getItemTotalQty(rec: StockOutRecord) {
+        if (rec.items_sum_qty !== undefined && rec.items_sum_qty !== null) {
+            return Number(rec.items_sum_qty);
+        }
         return rec.items?.reduce((acc, i) => acc + (i.qty || 0), 0) || 0;
     }
 
@@ -137,7 +141,11 @@
     }
 
     function getSellerName(rec: StockOutRecord) {
+        if (rec.store?.seller?.seller_name) return rec.store.seller.seller_name;
         if (rec.store?.seller?.name) return rec.store.seller.name;
+        if (rec.items && rec.items.length > 0 && (rec.items[0].product_variant?.product?.seller as any)?.seller_name) {
+            return (rec.items[0].product_variant?.product?.seller as any).seller_name;
+        }
         if (rec.items && rec.items.length > 0 && rec.items[0].product_variant?.product?.seller?.name) {
             return rec.items[0].product_variant.product.seller.name;
         }
@@ -425,7 +433,7 @@
     <ConfirmDialog
         show={isConfirmDeleteOpen}
         title="Batalkan Pengeluaran Barang"
-        message="Apakah Anda yakin ingin membatalkan transaksi pengeluaran #{selectedRecord?.resi_summary}? Kuantitas stok fisik di gudang akan dikembalikan."
+        message={`Apakah Anda yakin ingin membatalkan transaksi pengeluaran #${selectedRecord?.id ?? ''} (${selectedRecord?.store?.store_name ?? 'Stock Out'})? Kuantitas stok fisik di gudang akan dikembalikan.`}
         confirmText="Batalkan Transaksi"
         onconfirm={submitDelete}
         oncancel={() => isConfirmDeleteOpen = false}

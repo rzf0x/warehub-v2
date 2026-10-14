@@ -26,6 +26,10 @@
         Tag,
         Grid,
         Edit2,
+        Copy,
+        CheckCheck,
+        Lock,
+        Building2,
     } from "@lucide/svelte";
 
     interface VariantData {
@@ -127,6 +131,10 @@
     let resiList = $state<ResiItem[]>([]);
     let editingVariantIndex = $state<number | null>(null);
     let variantSearchQuery = $state<string>("");
+    let isSearchingVariants = $state<boolean>(false);
+    let searchResults = $state<VariantData[]>([]);
+    let searchDebounceTimeout: any = null;
+    let localVariants = $state<VariantData[]>([...variants]);
 
     function consolidateFormItems(items: FormItem[]): FormItem[] {
         const map = new Map<string, FormItem>();
@@ -227,10 +235,31 @@
         }
     }
 
+    // Stores filtered by selected seller
+    let filteredStores = $derived(
+        sellerId
+            ? stores.filter((st) => Number(st.seller_id) === Number(sellerId))
+            : stores,
+    );
+
+    function handleSellerChange() {
+        if (storeId) {
+            const currentStore = stores.find((s) => s.id === Number(storeId));
+            if (
+                currentStore &&
+                currentStore.seller_id &&
+                Number(currentStore.seller_id) !== Number(sellerId)
+            ) {
+                storeId = "";
+            }
+        }
+    }
+
     // Manual Items Management
     function addManualItem(paramSellerId?: number) {
         const sId = paramSellerId ?? (sellerId ? Number(sellerId) : (sellers[0]?.id ?? null));
         const sName = sellers.find((s) => s.id === sId)?.seller_name ?? "Mitra";
+        const newIndex = formItems.length;
         formItems = [
             ...formItems,
             {
@@ -244,18 +273,36 @@
                 available_stock: 0,
             },
         ];
+        openVariantSelector(newIndex, sId);
     }
 
     function removeManualItem(index: number) {
+        if (editingVariantIndex === index) {
+            editingVariantIndex = null;
+        } else if (editingVariantIndex !== null && editingVariantIndex > index) {
+            editingVariantIndex--;
+        }
         formItems = formItems.filter((_, idx) => idx !== index);
     }
 
-    function handleVariantSelect(index: number, variantId: number) {
-        const v = variants.find((varItem) => varItem.id === Number(variantId));
+    function handleVariantSelect(index: number, variant: VariantData | number) {
+        let v: VariantData | undefined;
+        if (typeof variant === "object" && variant !== null) {
+            v = variant;
+        } else {
+            const vId = Number(variant);
+            v = searchResults.find((i) => i.id === vId) ||
+                localVariants.find((i) => i.id === vId) ||
+                variants.find((i) => i.id === vId);
+        }
         if (!v) return;
 
+        if (!localVariants.some((item) => item.id === v!.id)) {
+            localVariants.push(v);
+        }
+
         const wId = Number(warehouseId);
-        const avail = v.stocks[wId] ?? 0;
+        const avail = v.stocks ? (v.stocks[wId] ?? 0) : 0;
         const currentSelling = Number(formItems[index]?.selling_price || 0);
 
         formItems[index] = {
@@ -273,24 +320,47 @@
         };
     }
 
-    function getVariantsBySeller(targetSellerId?: number | null) {
-        if (!targetSellerId) return variants;
-        const sId = Number(targetSellerId);
-        return variants.filter((v) => Number(v.seller_id) === sId);
+    async function fetchVariants(query: string, targetSellerId?: number | null) {
+        isSearchingVariants = true;
+        try {
+            const params = new URLSearchParams();
+            if (query && query.trim()) params.append("q", query.trim());
+            const sId = targetSellerId || (sellerId ? Number(sellerId) : null);
+            if (sId) params.append("seller_id", String(sId));
+            if (warehouseId) params.append("warehouse_id", String(warehouseId));
+
+            const res = await fetch(
+                `/superadmin/warehouse/stock-out/search-variants?${params.toString()}`,
+                {
+                    headers: {
+                        Accept: "application/json",
+                        "X-Requested-With": "XMLHttpRequest",
+                    },
+                },
+            );
+            if (res.ok) {
+                searchResults = await res.json();
+            }
+        } catch (e) {
+            console.error("Error fetching variants:", e);
+        } finally {
+            isSearchingVariants = false;
+        }
     }
 
-    function getSearchableVariants(targetSellerId?: number | null, query?: string) {
-        let list = getVariantsBySeller(targetSellerId);
-        if (!query || !query.trim()) return list;
+    function onVariantSearchInput(query: string, targetSellerId?: number | null) {
+        variantSearchQuery = query;
+        if (searchDebounceTimeout) clearTimeout(searchDebounceTimeout);
+        searchDebounceTimeout = setTimeout(() => {
+            fetchVariants(query, targetSellerId);
+        }, 250);
+    }
 
-        const q = query.trim().toLowerCase();
-        return list.filter((v) => {
-            const skuMatch = v.sku?.toLowerCase().includes(q);
-            const nameMatch = v.product_name?.toLowerCase().includes(q);
-            const sizeMatch = v.size?.toLowerCase().includes(q);
-            const colorMatch = v.color?.toLowerCase().includes(q);
-            return skuMatch || nameMatch || sizeMatch || colorMatch;
-        });
+    function openVariantSelector(index: number, targetSellerId?: number | null) {
+        editingVariantIndex = index;
+        variantSearchQuery = "";
+        searchResults = [];
+        fetchVariants("", targetSellerId);
     }
 
     function setBulkKonveksiForSeller(sellerId: number, konveksiId: number) {
@@ -349,18 +419,81 @@
     let isImporting = $state<boolean>(false);
     let importProgress = $state<number>(0);
     let importedFileName = $state<string>("");
+    let importStatusText = $state<string>("");
+    let importCurrentChunk = $state<number>(0);
+    let importTotalChunks = $state<number>(0);
+    let importTotalItems = $state<number>(0);
+    let importMatchedCount = $state<number>(0);
+    let importMissingCount = $state<number>(0);
     let missingSkusList = $state<MissingSkuItem[]>([]);
-    let isQuickCreateOpen = $state<boolean>(false);
 
-    // Quick Create Modal State
-    let quickSellerId = $state<number | string>(sellers[0]?.id ?? "");
-    let quickCategoryId = $state<number | string>(categories[0]?.id ?? "");
-    let quickBrandId = $state<number | string>(brands[0]?.id ?? "");
-    let quickKonveksiId = $state<number | string>(konveksis[0]?.id ?? "");
-    let quickTemplateId = $state<number | string>(templates[0]?.id ?? "");
-    let isQuickCreating = $state<boolean>(false);
+    // Missing SKUs copy & search state
+    let missingSearchQuery = $state<string>("");
+    let isCopiedAllJson = $state<boolean>(false);
+    let isCopiedAllSkus = $state<boolean>(false);
+    let copiedRowKey = $state<string | null>(null);
+
+    let filteredMissingSkus = $derived(
+        missingSkusList.filter(
+            (m) =>
+                !missingSearchQuery.trim() ||
+                (m.sku || "").toLowerCase().includes(missingSearchQuery.toLowerCase()) ||
+                (m.product_name || "").toLowerCase().includes(missingSearchQuery.toLowerCase()),
+        ),
+    );
+
+    function formatJsonSkuLine(sku: string): string {
+        return `"Nomor Referensi SKU": "${sku}",`;
+    }
+
+    async function copyAllJsonLines() {
+        if (missingSkusList.length === 0) return;
+        const text = missingSkusList
+            .map((m) => `      ${formatJsonSkuLine(m.sku)}`)
+            .join("\n");
+        await navigator.clipboard.writeText(text);
+        isCopiedAllJson = true;
+        setTimeout(() => (isCopiedAllJson = false), 2000);
+    }
+
+    async function copyAllSkusOnly() {
+        if (missingSkusList.length === 0) return;
+        const text = missingSkusList
+            .map((m) => m.sku)
+            .filter(Boolean)
+            .join("\n");
+        await navigator.clipboard.writeText(text);
+        isCopiedAllSkus = true;
+        setTimeout(() => (isCopiedAllSkus = false), 2000);
+    }
+
+    async function copyJsonLine(sku: string) {
+        if (!sku) return;
+        const line = formatJsonSkuLine(sku);
+        await navigator.clipboard.writeText(line);
+        copiedRowKey = sku + "_line";
+        setTimeout(() => {
+            if (copiedRowKey === sku + "_line") copiedRowKey = null;
+        }, 2000);
+    }
+
+    async function copySkuValueOnly(sku: string) {
+        if (!sku) return;
+        await navigator.clipboard.writeText(sku);
+        copiedRowKey = sku + "_raw";
+        setTimeout(() => {
+            if (copiedRowKey === sku + "_raw") copiedRowKey = null;
+        }, 2000);
+    }
 
     function handleJsonFileUpload(event: Event) {
+        if (!warehouseId || !sellerId) {
+            alert("Silakan pilih 1. Gudang Asal dan 2. Mitra Seller terlebih dahulu sebelum mengunggah file JSON!");
+            const input = event.target as HTMLInputElement;
+            input.value = "";
+            return;
+        }
+
         const input = event.target as HTMLInputElement;
         if (!input.files || input.files.length === 0) return;
 
@@ -412,16 +545,25 @@
 
     async function processImportChunks(allItems: any[]) {
         isImporting = true;
-        importProgress = 10;
+        importProgress = 5;
+        importStatusText = "Mempersiapkan data pesanan...";
         missingSkusList = [];
+        importTotalItems = allItems.length;
+        importMatchedCount = 0;
+        importMissingCount = 0;
 
         const chunkSize = 500;
         const totalChunks = Math.ceil(allItems.length / chunkSize);
+        importTotalChunks = totalChunks;
         const resolvedMatchedItems: FormItem[] = [];
         const accumulatedResis: ResiItem[] = [];
         const missingMap: Record<string, MissingSkuItem> = {};
 
         for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
+            importCurrentChunk = chunkIdx + 1;
+            importStatusText = `Memproses chunk ${chunkIdx + 1} dari ${totalChunks}... (${allItems.length} baris pesanan)`;
+            importProgress = Math.round((chunkIdx / totalChunks) * 90);
+
             const chunk = allItems.slice(
                 chunkIdx * chunkSize,
                 (chunkIdx + 1) * chunkSize,
@@ -456,8 +598,8 @@
                             resolvedMatchedItems.push({
                                 product_variant_id: m.product_variant_id,
                                 konveksi_id: null,
-                                seller_id: m.seller_id,
-                                seller_name: m.seller_name,
+                                seller_id: m.seller_id || Number(sellerId),
+                                seller_name: m.seller_name || (sellers.find((s) => s.id === Number(sellerId))?.seller_name ?? "Mitra"),
                                 sku: m.sku,
                                 product_name: m.product_name,
                                 size: m.size,
@@ -484,7 +626,9 @@
                 console.error("Error processing chunk:", err);
             }
 
-            importProgress = Math.round(((chunkIdx + 1) / totalChunks) * 90);
+            importMatchedCount = resolvedMatchedItems.length;
+            importMissingCount = Object.keys(missingMap).length;
+            importProgress = Math.round(((chunkIdx + 1) / totalChunks) * 100);
         }
 
         formItems = consolidateFormItems(resolvedMatchedItems);
@@ -492,63 +636,10 @@
         missingSkusList = Object.values(missingMap);
 
         importProgress = 100;
+        importStatusText = `Selesai! Berhasil mencocokkan ${resolvedMatchedItems.length} item.`;
         setTimeout(() => {
             isImporting = false;
-            if (missingSkusList.length > 0) {
-                isQuickCreateOpen = true;
-            }
-        }, 400);
-    }
-
-    async function handleQuickCreateProducts() {
-        if (!quickSellerId) {
-            alert("Silakan pilih Seller / Mitra terlebih dahulu!");
-            return;
-        }
-
-        isQuickCreating = true;
-        try {
-            const response = await fetch(
-                "/superadmin/warehouse/stock-out/quick-create-products",
-                {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        Accept: "application/json",
-                        "X-CSRF-TOKEN":
-                            (
-                                document.querySelector(
-                                    'meta[name="csrf-token"]',
-                                ) as HTMLMetaElement
-                            )?.content || "",
-                    },
-                    body: JSON.stringify({
-                        seller_id: quickSellerId,
-                        category_id: quickCategoryId || null,
-                        brand_id: quickBrandId || null,
-                        konveksi_id: quickKonveksiId || null,
-                        template_id: quickTemplateId || null,
-                        missing_items: missingSkusList,
-                    }),
-                },
-            );
-
-            const resData = await response.json();
-            if (resData.success && Array.isArray(resData.created_variants)) {
-                // Add newly created variants to runtime variants list
-                variants = [...variants, ...resData.created_variants];
-
-                // Re-run matching for imported items
-                alert(resData.message);
-                isQuickCreateOpen = false;
-            } else {
-                alert(resData.message || "Gagal membuat produk baru.");
-            }
-        } catch (err) {
-            alert("Terjadi kesalahan saat membuat produk baru.");
-        } finally {
-            isQuickCreating = false;
-        }
+        }, 500);
     }
 
     // Calculations & Validation Metrics
@@ -571,6 +662,200 @@
     let liveBruto = $derived(bruto > 0 ? bruto : liveTotalSelling);
     let liveEstProfit = $derived(liveBruto - liveTotalHpp);
 
+    // Deficit Items (Stok 0 atau Qty Keluar > Stok Gudang)
+    let adjustInputMap = $state<Record<number, number>>({});
+    let adjustingVariantId = $state<number | null>(null);
+    let isAdjustingAll = $state<boolean>(false);
+    let adjustSuccessToast = $state<string | null>(null);
+    let filterOnlyDeficit = $state<boolean>(false);
+
+    let deficitItems = $derived(
+        formItems
+            .map((item, index) => {
+                const avail = Number(item.available_stock ?? 0);
+                const qtyOut = Number(item.qty || 0);
+                const diff = qtyOut - avail;
+                const isZero = avail <= 0;
+                return {
+                    index,
+                    item,
+                    avail,
+                    qtyOut,
+                    diff: diff > 0 ? diff : (isZero ? qtyOut : 0),
+                    isZero,
+                    isDeficit: diff > 0 || isZero,
+                };
+            })
+            .filter((x) => x.isDeficit && x.item.product_variant_id),
+    );
+
+    function getCsrfHeader(): string {
+        const meta = (document.querySelector('meta[name="csrf-token"]') as HTMLMetaElement)?.content;
+        if (meta) return meta;
+        const cookieMatch = document.cookie.match(/XSRF-TOKEN=([^;]+)/);
+        if (cookieMatch) return decodeURIComponent(cookieMatch[1]);
+        return "";
+    }
+
+    async function handleQuickAdjustSingle(variantId: number, addQty: number, itemIndex: number) {
+        if (!warehouseId) {
+            alert("Harap tentukan 1. Gudang Asal terlebih dahulu di atas!");
+            return;
+        }
+        if (!addQty || addQty < 1) {
+            alert("Jumlah penambahan stok minimal 1 pcs!");
+            return;
+        }
+
+        adjustingVariantId = variantId;
+        try {
+            const res = await fetch("/superadmin/warehouse/stock-out/quick-adjust-stock", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Accept: "application/json",
+                    "X-Requested-With": "XMLHttpRequest",
+                    "X-CSRF-TOKEN": getCsrfHeader(),
+                },
+                body: JSON.stringify({
+                    warehouse_id: Number(warehouseId),
+                    variant_id: variantId,
+                    add_qty: addQty,
+                }),
+            });
+
+            const text = await res.text();
+            let data: any;
+            try {
+                data = JSON.parse(text);
+            } catch (err) {
+                console.error("Non-JSON response:", text);
+                if (res.status === 419) {
+                    alert("Sesi browser kedaluwarsa (419). Harap refresh halaman terlebih dahulu.");
+                    return;
+                }
+                alert(`Gagal (HTTP ${res.status}): ${text.substring(0, 120)}`);
+                return;
+            }
+
+            if (res.ok && data.success) {
+                formItems = formItems.map((fi) => {
+                    if (fi.product_variant_id === variantId) {
+                        return { ...fi, available_stock: data.new_stock };
+                    }
+                    return fi;
+                });
+                localVariants = localVariants.map((v) => {
+                    if (v.id === variantId) {
+                        return {
+                            ...v,
+                            stocks: {
+                                ...v.stocks,
+                                [Number(warehouseId)]: data.new_stock,
+                            },
+                        };
+                    }
+                    return v;
+                });
+                adjustSuccessToast = data.message;
+                setTimeout(() => (adjustSuccessToast = null), 3000);
+            } else {
+                alert(data.message || "Gagal menambahkan stok.");
+            }
+        } catch (e: any) {
+            console.error("Quick adjust error:", e);
+            alert("Terjadi kesalahan saat menambahkan stok: " + (e?.message || "Koneksi bermasalah"));
+        } finally {
+            adjustingVariantId = null;
+        }
+    }
+
+    async function handleQuickAdjustBulk() {
+        if (!warehouseId) {
+            alert("Harap tentukan 1. Gudang Asal terlebih dahulu di atas!");
+            return;
+        }
+        if (deficitItems.length === 0) return;
+
+        const payloadItems = deficitItems.map((d) => {
+            const manualAdd =
+                adjustInputMap[d.item.product_variant_id!] ??
+                (d.diff > 0 ? d.diff : d.qtyOut);
+            return {
+                variant_id: d.item.product_variant_id!,
+                add_qty: Math.max(1, manualAdd),
+            };
+        });
+
+        isAdjustingAll = true;
+        try {
+            const res = await fetch("/superadmin/warehouse/stock-out/quick-adjust-stock-bulk", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Accept: "application/json",
+                    "X-Requested-With": "XMLHttpRequest",
+                    "X-CSRF-TOKEN": getCsrfHeader(),
+                },
+                body: JSON.stringify({
+                    warehouse_id: Number(warehouseId),
+                    items: payloadItems,
+                }),
+            });
+
+            const text = await res.text();
+            let data: any;
+            try {
+                data = JSON.parse(text);
+            } catch (err) {
+                console.error("Non-JSON response:", text);
+                if (res.status === 419) {
+                    alert("Sesi browser kedaluwarsa (419). Harap refresh halaman terlebih dahulu.");
+                    return;
+                }
+                alert(`Gagal (HTTP ${res.status}): ${text.substring(0, 120)}`);
+                return;
+            }
+
+            if (res.ok && data.success && data.updated_stocks) {
+                const stockMap = data.updated_stocks;
+                formItems = formItems.map((fi) => {
+                    if (
+                        fi.product_variant_id &&
+                        stockMap[fi.product_variant_id] !== undefined
+                    ) {
+                        return {
+                            ...fi,
+                            available_stock: stockMap[fi.product_variant_id],
+                        };
+                    }
+                    return fi;
+                });
+                localVariants = localVariants.map((v) => {
+                    if (stockMap[v.id] !== undefined) {
+                        return {
+                            ...v,
+                            stocks: {
+                                ...v.stocks,
+                                [Number(warehouseId)]: stockMap[v.id],
+                            },
+                        };
+                    }
+                    return v;
+                });
+                adjustSuccessToast = data.message;
+                setTimeout(() => (adjustSuccessToast = null), 3500);
+            } else {
+                alert(data.message || "Gagal menambahkan stok massal.");
+            }
+        } catch (e: any) {
+            console.error("Bulk quick adjust error:", e);
+            alert("Terjadi kesalahan saat menambahkan stok massal: " + (e?.message || "Koneksi bermasalah"));
+        } finally {
+            isAdjustingAll = false;
+        }
+    }
+
     // Group items by Seller for grouped Manual UI
     let groupedBySeller = $derived(() => {
         const groups: Record<
@@ -582,6 +867,12 @@
             }
         > = {};
         formItems.forEach((item, index) => {
+            if (filterOnlyDeficit) {
+                const avail = Number(item.available_stock ?? 0);
+                const qtyOut = Number(item.qty || 0);
+                if (avail > 0 && qtyOut <= avail) return;
+            }
+
             const sId = item.seller_id ?? 0;
             const sName =
                 item.seller_name ||
@@ -740,74 +1031,119 @@
 
         <!-- Section 1: Form Header Meta Data -->
         <div
-            class="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm space-y-4"
+            class="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm space-y-6"
         >
-            <h3
-                class="text-sm font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2 border-b border-slate-100 dark:border-slate-800 pb-3"
-            >
-                <Store class="w-4 h-4 text-rose-500" />
-                Metadata Informasi Pengeluaran
-            </h3>
+            <div class="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
+                <h3 class="text-sm font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2">
+                    <Store class="w-4 h-4 text-rose-500" />
+                    <span>Informasi Gudang & Pengeluaran</span>
+                </h3>
+                <span class="text-[11px] font-semibold px-2.5 py-1 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 rounded-lg">
+                    Langkah 1: Tentukan Asal & Mitra
+                </span>
+            </div>
 
-            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
-                <!-- Gudang -->
-                <div class="space-y-1.5">
-                    <label
-                        for="warehouse-select"
-                        class="text-xs font-bold text-slate-700 dark:text-slate-300"
-                        >1. Gudang Asal <span class="text-rose-500">*</span></label
-                    >
+            <!-- Tier 1: 2 Kolom Lebar untuk Input Wajib Utama -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+                <!-- 1. Gudang Asal * -->
+                <div class="p-4 rounded-xl bg-slate-50/70 dark:bg-slate-950/50 border border-slate-200/80 dark:border-slate-800/80 space-y-2">
+                    <div class="flex items-center justify-between">
+                        <label
+                            for="warehouse-select"
+                            class="text-xs font-extrabold text-slate-800 dark:text-slate-200 flex items-center gap-1.5"
+                        >
+                            <Building2 class="w-4 h-4 text-rose-500" />
+                            <span>1. Gudang Asal</span>
+                            <span class="text-rose-500">*</span>
+                        </label>
+                        {#if warehouseId}
+                            <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400">Terpilih</span>
+                        {:else}
+                            <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 dark:bg-amber-950/50 dark:text-amber-400">Wajib Dipilih</span>
+                        {/if}
+                    </div>
                     <select
                         id="warehouse-select"
                         bind:value={warehouseId}
-                        class="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 px-3.5 py-2.5 text-xs font-semibold text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-rose-500"
+                        class="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3.5 py-2.5 text-xs font-bold text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-rose-500 shadow-xs"
                     >
-                        <option value="">-- Pilih Gudang --</option>
+                        <option value="">-- Pilih Gudang Asal --</option>
                         {#each warehouses as w}
                             <option value={w.id}>{w.name}</option>
                         {/each}
                     </select>
+                    <p class="text-[11px] text-slate-400 dark:text-slate-500">
+                        Lokasi fisik stok barang yang akan dikeluarkan / berkurang.
+                    </p>
                 </div>
 
-                <!-- Mitra Seller -->
-                <div class="space-y-1.5">
-                    <label
-                        for="seller-select"
-                        class="text-xs font-bold text-slate-700 dark:text-slate-300"
-                        >2. Mitra Seller <span class="text-rose-500">*</span></label
-                    >
+                <!-- 2. Mitra Seller * -->
+                <div class="p-4 rounded-xl bg-slate-50/70 dark:bg-slate-950/50 border border-slate-200/80 dark:border-slate-800/80 space-y-2">
+                    <div class="flex items-center justify-between">
+                        <label
+                            for="seller-select"
+                            class="text-xs font-extrabold text-slate-800 dark:text-slate-200 flex items-center gap-1.5"
+                        >
+                            <Store class="w-4 h-4 text-rose-500" />
+                            <span>2. Mitra Seller</span>
+                            <span class="text-rose-500">*</span>
+                        </label>
+                        {#if sellerId}
+                            <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400">Terpilih</span>
+                        {:else}
+                            <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 dark:bg-amber-950/50 dark:text-amber-400">Wajib Dipilih</span>
+                        {/if}
+                    </div>
                     <select
                         id="seller-select"
                         bind:value={sellerId}
-                        class="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 px-3.5 py-2.5 text-xs font-semibold text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-rose-500"
+                        onchange={handleSellerChange}
+                        class="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3.5 py-2.5 text-xs font-bold text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-rose-500 shadow-xs"
                     >
                         <option value="">-- Pilih Mitra Seller --</option>
                         {#each sellers as s}
                             <option value={s.id}>{s.seller_name}</option>
                         {/each}
                     </select>
+                    <p class="text-[11px] text-slate-400 dark:text-slate-500">
+                        Mitra pemilik produk yang akan memfilter daftar toko marketplace.
+                    </p>
                 </div>
+            </div>
 
-                <!-- Toko Marketplace -->
+            <!-- Tier 2: 3 Kolom untuk Detail Toko, Periode, Tanggal -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 pt-1">
+                <!-- Toko Marketplace (Opsional) - Terfilter berdasarkan sellerId -->
                 <div class="space-y-1.5">
                     <label
                         for="store-select"
-                        class="text-xs font-bold text-slate-700 dark:text-slate-300"
-                        >Toko Marketplace (Opsional)</label
+                        class="text-xs font-bold text-slate-700 dark:text-slate-300 flex items-center justify-between"
                     >
+                        <span>Toko Marketplace (Opsional)</span>
+                        {#if sellerId}
+                            <span class="text-[10px] font-normal text-slate-400">
+                                {filteredStores.length} toko tersedia
+                            </span>
+                        {/if}
+                    </label>
                     <select
                         id="store-select"
                         bind:value={storeId}
                         onchange={handleStoreChange}
-                        class="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 px-3.5 py-2.5 text-xs text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-rose-500"
+                        class="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 px-3.5 py-2.5 text-xs text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-rose-500 font-medium"
                     >
                         <option value="">Semua / Toko Umum</option>
-                        {#each stores as st}
-                            <option value={st.id}
-                                >{st.store_name} ({st.marketplace})</option
-                            >
+                        {#each filteredStores as st}
+                            <option value={st.id}>
+                                {st.store_name} ({st.marketplace})
+                            </option>
                         {/each}
                     </select>
+                    {#if sellerId && filteredStores.length === 0}
+                        <p class="text-[10px] text-amber-500">
+                            * Mitra ini belum memiliki toko marketplace yang ditautkan.
+                        </p>
+                    {/if}
                 </div>
 
                 <!-- Periode Pembukuan -->
@@ -815,60 +1151,55 @@
                     <label
                         for="period-select"
                         class="text-xs font-bold text-slate-700 dark:text-slate-300"
-                        >Periode Pembukuan</label
                     >
+                        Periode Pembukuan (Opsional)
+                    </label>
                     <select
                         id="period-select"
                         bind:value={periodId}
-                        class="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 px-3.5 py-2.5 text-xs text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-rose-500"
+                        class="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 px-3.5 py-2.5 text-xs text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-rose-500 font-medium"
                     >
-                        <option value="">Pilih Periode</option>
+                        <option value="">-- Pilih Periode --</option>
                         {#each periods as p}
-                            <option value={p.id}
-                                >{p.name} {p.is_active ? "(Aktif)" : ""}</option
-                            >
+                            <option value={p.id}>
+                                {p.name} {p.is_active ? "(Aktif)" : ""}
+                            </option>
                         {/each}
                     </select>
                 </div>
 
-                <!-- Tanggal -->
+                <!-- Tanggal Pengeluaran * -->
                 <div class="space-y-1.5">
                     <label
                         for="stock-out-date"
                         class="text-xs font-bold text-slate-700 dark:text-slate-300"
-                        >Tanggal Pengeluaran <span class="text-rose-500">*</span></label
                     >
+                        Tanggal Pengeluaran <span class="text-rose-500">*</span>
+                    </label>
                     <input
                         id="stock-out-date"
                         type="date"
                         bind:value={date}
-                        class="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 px-3.5 py-2.5 text-xs text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-rose-500"
+                        class="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 px-3.5 py-2.5 text-xs text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-rose-500 font-medium"
                     />
                 </div>
             </div>
 
-            {#if !warehouseId || !sellerId}
-                <div class="p-3 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded-xl flex items-center gap-3">
-                    <AlertTriangle class="w-4 h-4 text-amber-600 shrink-0" />
-                    <p class="text-xs font-semibold text-amber-800 dark:text-amber-300">
-                        Harap tentukan <strong>1. Gudang Asal</strong> dan <strong>2. Mitra Seller</strong> terlebih dahulu di atas sebelum menambah / meng-import item barang keluar.
-                    </p>
-                </div>
-            {/if}
-
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
+            <!-- Tier 3: Total Bruto & Catatan -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-slate-100 dark:border-slate-800">
                 <!-- Total Bruto -->
                 <div class="space-y-1.5">
                     <label
                         for="bruto-input"
                         class="text-xs font-bold text-slate-700 dark:text-slate-300"
-                        >Total Bruto Penjualan (Rp)</label
                     >
+                        Total Bruto Penjualan (Rp)
+                    </label>
                     <input
                         id="bruto-input"
                         type="number"
                         bind:value={bruto}
-                        placeholder="Otomatis terisi dari item / import"
+                        placeholder="Otomatis terisi dari JSON / item..."
                         class="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 px-3.5 py-2.5 text-xs text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-rose-500 font-semibold"
                     />
                 </div>
@@ -878,8 +1209,9 @@
                     <label
                         for="note-input"
                         class="text-xs font-bold text-slate-700 dark:text-slate-300"
-                        >Catatan Transaksi</label
                     >
+                        Catatan Transaksi
+                    </label>
                     <input
                         id="note-input"
                         type="text"
@@ -903,108 +1235,209 @@
                         class="text-sm font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2"
                     >
                         <Upload class="w-4 h-4 text-cyan-500" />
-                        Import Cleaned Marketplace JSON (Shopee / TikTok Engine Output)
+                        <span>Import Cleaned Marketplace JSON (Shopee / TikTok Engine Output)</span>
                     </h3>
                     {#if importedFileName}
                         <span
                             class="px-2.5 py-0.5 text-xs font-semibold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 rounded-full flex items-center gap-1"
                         >
-                            <Check class="w-3.5 h-3.5" /> File Loaded ({formItems.length}
-                            items matched)
+                            <Check class="w-3.5 h-3.5" /> File: {importedFileName} ({formItems.length} matched)
                         </span>
                     {/if}
                 </div>
 
-                <div
-                    class="relative border-2 border-dashed border-slate-300 dark:border-slate-700 hover:border-cyan-500 dark:hover:border-cyan-500 rounded-2xl p-8 text-center transition-all bg-slate-50/50 dark:bg-slate-950/40"
-                >
-                    <input
-                        type="file"
-                        accept=".json"
-                        onchange={handleJsonFileUpload}
-                        class="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
-                    />
-                    <div class="space-y-3 pointer-events-none">
-                        <div
-                            class="w-12 h-12 rounded-2xl bg-cyan-50 dark:bg-cyan-950/50 text-cyan-500 mx-auto flex items-center justify-center"
-                        >
-                            <Upload class="w-6 h-6" />
-                        </div>
-                        <div>
-                            {#if importedFileName}
-                                <span
-                                    class="font-bold text-sm text-cyan-600 dark:text-cyan-400"
-                                    >{importedFileName}</span
-                                >
-                            {:else}
-                                <p
-                                    class="text-xs font-bold text-slate-700 dark:text-slate-300"
-                                >
-                                    Drop File JSON Data Cleaning di sini, atau <span
-                                        class="text-cyan-600 dark:text-cyan-400 underline"
-                                        >Browse File</span
-                                    >
+                <!-- Dropzone Area -->
+                {#if !warehouseId || !sellerId}
+                    <!-- Locked / Readonly State -->
+                    <div
+                        class="relative border-2 border-dashed border-amber-300 dark:border-amber-700/60 bg-amber-50/40 dark:bg-amber-950/20 rounded-2xl p-8 text-center transition-all cursor-not-allowed select-none"
+                    >
+                        <div class="space-y-3">
+                            <div
+                                class="w-12 h-12 rounded-2xl bg-amber-100 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 mx-auto flex items-center justify-center shadow-xs"
+                            >
+                                <Lock class="w-6 h-6" />
+                            </div>
+                            <div class="max-w-md mx-auto space-y-1">
+                                <h4 class="text-xs font-extrabold text-amber-900 dark:text-amber-200">
+                                    Upload File JSON Terkunci
+                                </h4>
+                                <p class="text-xs font-semibold text-amber-700 dark:text-amber-300">
+                                    Silakan pilih <strong>1. Gudang Asal</strong> dan <strong>2. Mitra Seller</strong> terlebih dahulu di atas sebelum mengunggah file JSON.
                                 </p>
-                                <p class="text-[11px] text-slate-400 mt-1">
-                                    File hasil export dari menu Cleaning Data
-                                    Shopee / TikTok Shop Warehub
-                                </p>
-                            {/if}
+                            </div>
                         </div>
                     </div>
-                </div>
-
-                {#if isImporting}
-                    <div class="space-y-1.5 pt-2">
-                        <div
-                            class="flex justify-between text-xs font-semibold text-slate-600 dark:text-slate-400"
-                        >
-                            <span>Proses Chunked Import Streaming...</span>
-                            <span>{importProgress}%</span>
-                        </div>
-                        <div
-                            class="w-full bg-slate-100 dark:bg-slate-800 h-2.5 rounded-full overflow-hidden"
-                        >
+                {:else}
+                    <!-- Active Dropzone State -->
+                    <div
+                        class="relative border-2 border-dashed border-slate-300 dark:border-slate-700 hover:border-cyan-500 dark:hover:border-cyan-500 rounded-2xl p-8 text-center transition-all bg-slate-50/50 dark:bg-slate-950/40 group hover:bg-cyan-50/20"
+                    >
+                        <input
+                            type="file"
+                            accept=".json"
+                            onchange={handleJsonFileUpload}
+                            class="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                        />
+                        <div class="space-y-3 pointer-events-none">
                             <div
-                                class="bg-gradient-to-r from-cyan-500 to-rose-500 h-full transition-all duration-300 rounded-full"
-                                style="width: {importProgress}%"
-                            ></div>
+                                class="w-12 h-12 rounded-2xl bg-cyan-50 dark:bg-cyan-950/50 text-cyan-500 mx-auto flex items-center justify-center group-hover:scale-110 transition-transform"
+                            >
+                                <Upload class="w-6 h-6" />
+                            </div>
+                            <div>
+                                {#if importedFileName}
+                                    <div class="space-y-1">
+                                        <span class="font-bold text-sm text-cyan-600 dark:text-cyan-400">
+                                            {importedFileName}
+                                        </span>
+                                        <p class="text-[11px] text-slate-400">
+                                            Klik atau drag file JSON lain untuk mengganti data.
+                                        </p>
+                                    </div>
+                                {:else}
+                                    <p class="text-xs font-bold text-slate-700 dark:text-slate-300">
+                                        Drop File JSON Data Cleaning di sini, atau{" "}
+                                        <span class="text-cyan-600 dark:text-cyan-400 underline underline-offset-2">Browse File</span>
+                                    </p>
+                                    <p class="text-[11px] text-slate-400 mt-1">
+                                        File hasil export dari menu Cleaning Data Shopee / TikTok Shop Warehub
+                                    </p>
+                                {/if}
+                            </div>
                         </div>
                     </div>
                 {/if}
 
+                <!-- Section Card Tersendiri: Missing SKUs yang Tidak Ada di Database -->
                 {#if missingSkusList.length > 0}
                     <div
-                        class="p-4 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded-xl flex items-center justify-between gap-4"
+                        class="p-5 bg-white dark:bg-slate-900 border-2 border-amber-300 dark:border-amber-700/60 rounded-2xl shadow-sm space-y-4"
                     >
-                        <div class="flex items-center gap-3">
-                            <AlertTriangle
-                                class="w-5 h-5 text-amber-600 shrink-0"
-                            />
-                            <div>
-                                <h4
-                                    class="text-xs font-bold text-amber-900 dark:text-amber-300"
+                        <!-- Header Card -->
+                        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-amber-100 dark:border-amber-900/40 pb-3">
+                            <div class="flex items-start gap-3">
+                                <div class="w-9 h-9 rounded-xl bg-amber-100 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 flex items-center justify-center shrink-0 mt-0.5">
+                                    <AlertTriangle class="w-5 h-5" />
+                                </div>
+                                <div>
+                                    <h4 class="text-sm font-bold text-amber-900 dark:text-amber-200 flex items-center gap-2">
+                                        <span>Ditemukan {missingSkusList.length} SKU Belum Terdaftar di Database Gudang</span>
+                                        <span class="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-amber-200 dark:bg-amber-900/80 text-amber-800 dark:text-amber-200">
+                                            {missingSkusList.length} SKU
+                                        </span>
+                                    </h4>
+                                    <p class="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
+                                        Daftar baris referensi SKU asli dari file JSON yang belum tercatat. Copy baris di bawah untuk mencari & mengubah langsung pada file JSON sebelum di-import.
+                                    </p>
+                                </div>
+                            </div>
+
+                            <!-- Action Buttons Copy All -->
+                            <div class="flex items-center gap-2 shrink-0">
+                                <button
+                                    type="button"
+                                    onclick={copyAllJsonLines}
+                                    class="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-xl shadow-xs flex items-center gap-1.5 transition-all"
+                                    title="Copy semua baris dalam format JSON: &quot;Nomor Referensi SKU&quot;: &quot;...&quot;"
                                 >
-                                    Ditemukan {missingSkusList.length} SKU yang Belum
-                                    Terdaftar di Database Gudang
-                                </h4>
-                                <p
-                                    class="text-[11px] text-amber-700 dark:text-amber-400"
+                                    {#if isCopiedAllJson}
+                                        <CheckCheck class="w-4 h-4 text-emerald-200" />
+                                        <span>Tersalin Semua!</span>
+                                    {:else}
+                                        <Copy class="w-4 h-4" />
+                                        <span>Copy Semua Format JSON</span>
+                                    {/if}
+                                </button>
+                                <button
+                                    type="button"
+                                    onclick={copyAllSkusOnly}
+                                    class="px-3 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-bold rounded-xl flex items-center gap-1.5 transition-all"
+                                    title="Copy hanya daftar teks SKU saja"
                                 >
-                                    Gunakan fitur Auto-Generate untuk membuat
-                                    produk & varian secara massal instan.
-                                </p>
+                                    {#if isCopiedAllSkus}
+                                        <CheckCheck class="w-4 h-4 text-emerald-500" />
+                                        <span>Tersalin!</span>
+                                    {:else}
+                                        <Copy class="w-4 h-4" />
+                                        <span>Copy List SKU Saja</span>
+                                    {/if}
+                                </button>
                             </div>
                         </div>
-                        <button
-                            onclick={() => (isQuickCreateOpen = true)}
-                            class="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-xl shadow-sm flex items-center gap-1.5 transition-all shrink-0"
-                        >
-                            <Sparkles class="w-3.5 h-3.5" />
-                            <span
-                                >Auto-Generate Missing Products ({missingSkusList.length})</span
-                            >
-                        </button>
+
+                        <!-- Search Bar -->
+                        <div class="flex items-center gap-2">
+                            <div class="relative flex-1">
+                                <Search class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                                <input
+                                    type="text"
+                                    bind:value={missingSearchQuery}
+                                    placeholder="Filter SKU (contoh: BKA 44)..."
+                                    class="w-full pl-9 pr-3.5 py-2 text-xs rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-amber-500 font-mono"
+                                />
+                            </div>
+                            {#if missingSearchQuery}
+                                <button
+                                    type="button"
+                                    onclick={() => (missingSearchQuery = "")}
+                                    class="text-xs text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 px-2"
+                                >
+                                    Reset
+                                </button>
+                            {/if}
+                        </div>
+
+                        <!-- Simple One-Line List -->
+                        <div class="max-h-80 overflow-y-auto space-y-2 p-1.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/40">
+                            {#each filteredMissingSkus as m, idx}
+                                <div
+                                    class="flex items-center justify-between gap-3 p-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:border-amber-400 dark:hover:border-amber-600 transition-all shadow-xs group"
+                                >
+                                    <div class="flex items-center gap-3 overflow-hidden min-w-0">
+                                        <span class="text-[11px] font-mono text-slate-400 w-6 text-right shrink-0 select-none">
+                                            {idx + 1}.
+                                        </span>
+                                        <code class="font-mono text-xs font-bold text-amber-600 dark:text-amber-400 truncate select-all">
+                                            {formatJsonSkuLine(m.sku)}
+                                        </code>
+                                    </div>
+                                    <div class="flex items-center gap-2 shrink-0">
+                                        <button
+                                            type="button"
+                                            onclick={() => copyJsonLine(m.sku)}
+                                            class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg bg-amber-50 dark:bg-amber-950/60 text-amber-800 dark:text-amber-200 hover:bg-amber-100 dark:hover:bg-amber-900/60 border border-amber-200 dark:border-amber-800 transition-all shadow-xs"
+                                            title="Copy satu baris JSON: &quot;Nomor Referensi SKU&quot;: &quot;{m.sku}&quot;,"
+                                        >
+                                            {#if copiedRowKey === m.sku + "_line"}
+                                                <CheckCheck class="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                                                <span class="text-emerald-700 dark:text-emerald-300">Tersalin!</span>
+                                            {:else}
+                                                <Copy class="w-3.5 h-3.5 text-amber-600" />
+                                                <span>Copy Baris</span>
+                                            {/if}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onclick={() => copySkuValueOnly(m.sku)}
+                                            class="inline-flex items-center px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 transition-all"
+                                            title="Copy hanya nilai SKU: {m.sku}"
+                                        >
+                                            {#if copiedRowKey === m.sku + "_raw"}
+                                                <CheckCheck class="w-3.5 h-3.5 text-emerald-500" />
+                                                <span class="text-emerald-600 dark:text-emerald-400 ml-1">Tersalin!</span>
+                                            {:else}
+                                                <span>SKU Saja</span>
+                                            {/if}
+                                        </button>
+                                    </div>
+                                </div>
+                            {:else}
+                                <div class="py-8 text-center text-slate-400 text-xs">
+                                    Tidak ada SKU yang cocok dengan pencarian "{missingSearchQuery}".
+                                </div>
+                            {/each}
+                        </div>
                     </div>
                 {/if}
             </div>
@@ -1087,27 +1520,203 @@
             </div>
         </div>
 
+        <!-- Section: Peringatan & Penyesuaian Manual Produk Stok Kosong (0 pcs) / Defisit -->
+        {#if deficitItems.length > 0}
+            <div
+                class="bg-white dark:bg-slate-900 rounded-2xl border-2 border-rose-300 dark:border-rose-800/80 shadow-md p-6 space-y-4"
+            >
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-rose-100 dark:border-rose-950 pb-3">
+                    <div class="flex items-start gap-3">
+                        <div class="w-10 h-10 rounded-2xl bg-rose-100 dark:bg-rose-950/70 text-rose-600 dark:text-rose-400 flex items-center justify-center shrink-0 shadow-xs">
+                            <AlertTriangle class="w-5 h-5 animate-pulse" />
+                        </div>
+                        <div>
+                            <div class="flex items-center gap-2">
+                                <h3 class="text-sm font-extrabold text-rose-950 dark:text-rose-200">
+                                    Perhatian: Ditemukan {deficitItems.length} Produk dengan Stok Kosong (0 pcs) / Selisih Gudang
+                                </h3>
+                                <span class="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300">
+                                    {deficitItems.length} Item Defisit
+                                </span>
+                            </div>
+                            <p class="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
+                                Produk berikut memiliki stok 0 atau jumlah barang keluar melebihi stok yang ada di sistem gudang. Kamu bisa menambahkan stok secara manual ke sistem di sini atau menyesuaikan jumlah pcs keluar.
+                            </p>
+                        </div>
+                    </div>
+
+                    <!-- Action Buttons -->
+                    <div class="flex items-center gap-2 shrink-0">
+                        <button
+                            type="button"
+                            onclick={handleQuickAdjustBulk}
+                            disabled={isAdjustingAll || !warehouseId}
+                            class="px-3.5 py-2 bg-gradient-to-r from-rose-600 to-pink-600 hover:from-rose-500 hover:to-pink-500 disabled:opacity-50 text-white text-xs font-bold rounded-xl shadow-xs flex items-center gap-1.5 transition-all"
+                            title="Tambahkan stok fisik untuk semua item yang defisit sesuai kekurangannya ke gudang aktif"
+                        >
+                            {#if isAdjustingAll}
+                                <RefreshCw class="w-4 h-4 animate-spin" />
+                                <span>Menyesuaikan Stok...</span>
+                            {:else}
+                                <Sparkles class="w-4 h-4" />
+                                <span>Top-Up Semua Stok Selisih</span>
+                            {/if}
+                        </button>
+                    </div>
+                </div>
+
+                {#if adjustSuccessToast}
+                    <div class="p-3 bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800 rounded-xl flex items-center gap-2 text-xs font-bold text-emerald-800 dark:text-emerald-300 animate-in fade-in">
+                        <CheckCheck class="w-4 h-4 text-emerald-600" />
+                        <span>{adjustSuccessToast}</span>
+                    </div>
+                {/if}
+
+                <!-- Tabel Defisit & Penambahan Manual -->
+                <div class="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-950/30">
+                    <table class="w-full text-left text-xs">
+                        <thead class="bg-rose-50/70 dark:bg-rose-950/40 text-rose-900 dark:text-rose-200 font-bold border-b border-rose-100 dark:border-rose-900/50">
+                            <tr>
+                                <th class="p-3 w-10 text-center">No</th>
+                                <th class="p-3">SKU & Varian Produk</th>
+                                <th class="p-3 w-32">Mitra Seller</th>
+                                <th class="p-3 text-center w-28">Stok Sistem</th>
+                                <th class="p-3 text-center w-28">Qty Keluar</th>
+                                <th class="p-3 text-center w-32">Status Selisih</th>
+                                <th class="p-3 w-60 text-right">Tambah Stok Manual ke Gudang</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-200 dark:divide-slate-800 font-medium">
+                            {#each deficitItems as def, idx}
+                                <tr class="hover:bg-rose-50/30 dark:hover:bg-rose-950/20 transition-colors">
+                                    <td class="p-3 text-center text-slate-400 text-[11px]">{idx + 1}</td>
+                                    <td class="p-3">
+                                        <div class="font-bold text-slate-800 dark:text-slate-100 truncate max-w-sm">
+                                            {def.item.product_name || "Produk"}
+                                        </div>
+                                        <div class="font-mono text-rose-600 dark:text-rose-400 font-semibold text-[11px] flex items-center gap-1.5 mt-0.5">
+                                            <span>{def.item.sku}</span>
+                                            {#if def.item.size}
+                                                <span class="px-1.5 py-0.2 rounded bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-[10px] font-bold">
+                                                    {def.item.size}
+                                                </span>
+                                            {/if}
+                                            {#if def.item.color}
+                                                <span class="text-slate-400 text-[10px]">({def.item.color})</span>
+                                            {/if}
+                                        </div>
+                                    </td>
+                                    <td class="p-3 text-slate-600 dark:text-slate-400 truncate">
+                                        {def.item.seller_name || "Mitra"}
+                                    </td>
+                                    <td class="p-3 text-center">
+                                        <span class="px-2 py-1 rounded-md text-[11px] font-extrabold {def.isZero ? 'bg-rose-200 text-rose-900 dark:bg-rose-900/80 dark:text-rose-200' : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'}">
+                                            {def.avail} pcs
+                                        </span>
+                                    </td>
+                                    <td class="p-3 text-center">
+                                        <input
+                                            type="number"
+                                            min="1"
+                                            bind:value={formItems[def.index].qty}
+                                            class="w-16 text-center rounded-xl border border-rose-300 dark:border-rose-700 bg-white dark:bg-slate-900 py-1 text-xs font-extrabold text-rose-600 dark:text-rose-400 focus:ring-2 focus:ring-rose-500"
+                                            title="Ubah Qty Keluar jika diperlukan"
+                                        />
+                                    </td>
+                                    <td class="p-3 text-center">
+                                        {#if def.isZero}
+                                            <span class="text-[11px] font-extrabold text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/60 px-2 py-0.5 rounded-full border border-rose-200 dark:border-rose-800/60">
+                                                Stok 0 (Kosong)
+                                            </span>
+                                        {:else}
+                                            <span class="text-[11px] font-extrabold text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/60 px-2 py-0.5 rounded-full border border-amber-200 dark:border-amber-800/60">
+                                                Kurang {def.diff} pcs
+                                            </span>
+                                        {/if}
+                                    </td>
+                                    <td class="p-3 text-right">
+                                        <div class="flex items-center justify-end gap-1.5">
+                                            <div class="relative w-20">
+                                                <input
+                                                    type="number"
+                                                    min="1"
+                                                    placeholder="Qty"
+                                                    value={adjustInputMap[def.item.product_variant_id!] ?? (def.diff > 0 ? def.diff : def.qtyOut)}
+                                                    oninput={(e) => {
+                                                        adjustInputMap[def.item.product_variant_id!] = Number((e.target as HTMLInputElement).value);
+                                                    }}
+                                                    class="w-full text-center rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 py-1 text-xs font-bold text-slate-800 dark:text-slate-100"
+                                                />
+                                            </div>
+                                            <button
+                                                type="button"
+                                                disabled={adjustingVariantId === def.item.product_variant_id || !warehouseId}
+                                                onclick={() => {
+                                                    const addQty = adjustInputMap[def.item.product_variant_id!] ?? (def.diff > 0 ? def.diff : def.qtyOut);
+                                                    handleQuickAdjustSingle(def.item.product_variant_id!, addQty, def.index);
+                                                }}
+                                                class="px-2.5 py-1 text-xs font-bold rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white flex items-center gap-1 transition-all shadow-xs shrink-0"
+                                                title="Tambah stok ke gudang asal sekarang"
+                                            >
+                                                {#if adjustingVariantId === def.item.product_variant_id}
+                                                    <RefreshCw class="w-3.5 h-3.5 animate-spin" />
+                                                {:else}
+                                                    <Plus class="w-3.5 h-3.5" />
+                                                    <span>Tambah Stok</span>
+                                                {/if}
+                                            </button>
+                                        </div>
+                                    </td>
+                                </tr>
+                            {/each}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        {/if}
+
         <!-- Section 4: Items Form Table (Grouped Per Seller) -->
         <div
             class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden space-y-6 p-6"
         >
             <div
-                class="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-4"
+                class="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-4 gap-3"
             >
                 <div>
                     <h3
                         class="text-sm font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2"
                     >
                         <Layers class="w-4 h-4 text-rose-500" />
-                        Rincian Item Barang Keluar ({formItems.length} Baris)
+                        <span>Rincian Item Barang Keluar ({formItems.length} Baris)</span>
+                        {#if deficitItems.length > 0}
+                            <span class="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300">
+                                {deficitItems.length} Selisih / Stok 0
+                            </span>
+                        {/if}
                     </h3>
                     <p class="text-xs text-slate-400">
-                        Dikelompokkan per-Mitra Seller dengan penentuan Vendor
-                        Konveksi & Harga Modal/Jual.
+                        {#if filterOnlyDeficit}
+                            <span class="text-rose-600 dark:text-rose-400 font-bold">⚠️ Menampilkan hanya {deficitItems.length} produk dengan stok kosong / defisit.</span>
+                        {:else}
+                            Dikelompokkan per-Mitra Seller dengan penentuan Vendor Konveksi & Harga Modal/Jual.
+                        {/if}
                     </p>
                 </div>
 
-                <div class="flex items-center gap-2">
+                <div class="flex items-center gap-2 flex-wrap">
+                    {#if deficitItems.length > 0}
+                        <button
+                            type="button"
+                            onclick={() => (filterOnlyDeficit = !filterOnlyDeficit)}
+                            class="px-3 py-2 text-xs font-bold rounded-xl transition-all flex items-center gap-1.5 {filterOnlyDeficit
+                                ? 'bg-rose-600 text-white shadow-sm'
+                                : 'bg-rose-50 dark:bg-rose-950/50 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800'}"
+                        >
+                            <AlertTriangle class="w-3.5 h-3.5" />
+                            <span>{filterOnlyDeficit ? 'Tampilkan Semua Item' : `Hanya Stok 0 / Selisih (${deficitItems.length})`}</span>
+                        </button>
+                    {/if}
+
                     {#if formItems.length > 0}
                         <button
                             type="button"
@@ -1223,40 +1832,43 @@
                                         <td class="p-3 text-slate-400"
                                             >{index + 1}</td>
                                         <td class="p-3">
-                                            {#if editingVariantIndex === index || !item.product_variant_id}
+                                            {#if editingVariantIndex === index}
                                                 <div class="relative z-20 space-y-1.5 min-w-[280px]">
                                                     <div class="flex items-center gap-1.5">
                                                         <div class="relative flex-1">
-                                                            <Search class="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-rose-500" />
+                                                            {#if isSearchingVariants}
+                                                                <RefreshCw class="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-rose-500 animate-spin" />
+                                                            {:else}
+                                                                <Search class="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-rose-500" />
+                                                            {/if}
                                                             <input
                                                                 type="text"
                                                                 bind:value={variantSearchQuery}
+                                                                oninput={(e) => onVariantSearchInput((e.target as HTMLInputElement).value, item.seller_id || group.seller_id || sellerId)}
                                                                 placeholder="Cari SKU / Nama / Size..."
                                                                 class="w-full rounded-xl border border-rose-400 dark:border-rose-600 bg-white dark:bg-slate-900 pl-8 pr-3 py-1.5 text-xs text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-rose-500 shadow-sm font-medium"
                                                             />
                                                         </div>
-                                                        {#if item.product_variant_id}
-                                                            <button
-                                                                type="button"
-                                                                onclick={() => {
-                                                                    editingVariantIndex = null;
-                                                                    variantSearchQuery = "";
-                                                                }}
-                                                                class="p-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 shrink-0"
-                                                                title="Batal"
-                                                            >
-                                                                <X class="w-4 h-4" />
-                                                            </button>
-                                                        {/if}
+                                                        <button
+                                                            type="button"
+                                                            onclick={() => {
+                                                                editingVariantIndex = null;
+                                                                variantSearchQuery = "";
+                                                            }}
+                                                            class="p-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 shrink-0"
+                                                            title="Tutup"
+                                                        >
+                                                            <X class="w-4 h-4" />
+                                                        </button>
                                                     </div>
 
                                                     <!-- Filtered Variants Search List -->
                                                     <div class="max-h-48 overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-xl divide-y divide-slate-100 dark:divide-slate-800">
-                                                        {#each getSearchableVariants(item.seller_id || group.seller_id || sellerId, variantSearchQuery) as v}
+                                                        {#each searchResults.slice(0, 30) as v}
                                                             <button
                                                                 type="button"
                                                                 onclick={() => {
-                                                                    handleVariantSelect(index, v.id);
+                                                                    handleVariantSelect(index, v);
                                                                     editingVariantIndex = null;
                                                                     variantSearchQuery = "";
                                                                 }}
@@ -1282,12 +1894,18 @@
                                                             </button>
                                                         {:else}
                                                             <div class="p-3 text-center text-slate-400 text-xs italic">
-                                                                Tidak ada varian cocok dengan "{variantSearchQuery}"
+                                                                {#if isSearchingVariants}
+                                                                    Sedang mencari data varian...
+                                                                {:else if variantSearchQuery.trim()}
+                                                                    Tidak ada varian cocok dengan "{variantSearchQuery}"
+                                                                {:else}
+                                                                    Ketik SKU atau nama produk untuk mencari varian...
+                                                                {/if}
                                                             </div>
                                                         {/each}
                                                     </div>
                                                 </div>
-                                            {:else}
+                                            {:else if item.product_variant_id}
                                                 <div class="flex items-center justify-between gap-2 group">
                                                     <div>
                                                         <div
@@ -1316,7 +1934,7 @@
 
                                                     <button
                                                         type="button"
-                                                        onclick={() => (editingVariantIndex = index)}
+                                                        onclick={() => openVariantSelector(index, item.seller_id || group.seller_id || sellerId)}
                                                         class="px-2 py-1 bg-slate-100 dark:bg-slate-800 hover:bg-rose-50 dark:hover:bg-rose-950/50 text-slate-600 hover:text-rose-600 dark:text-slate-400 dark:hover:text-rose-400 text-[11px] font-bold rounded-lg transition-all flex items-center gap-1 shrink-0 border border-slate-200 dark:border-slate-700"
                                                         title="Ubah Produk / Size"
                                                     >
@@ -1324,6 +1942,15 @@
                                                         <span>Ubah</span>
                                                     </button>
                                                 </div>
+                                            {:else}
+                                                <button
+                                                    type="button"
+                                                    onclick={() => openVariantSelector(index, item.seller_id || group.seller_id || sellerId)}
+                                                    class="w-full py-2 px-3 border border-dashed border-rose-300 dark:border-rose-700 hover:border-rose-500 rounded-xl text-rose-600 dark:text-rose-400 hover:bg-rose-50/50 dark:hover:bg-rose-950/30 flex items-center justify-center gap-2 text-xs font-semibold transition-all"
+                                                >
+                                                    <Search class="w-3.5 h-3.5" />
+                                                    <span>Pilih Varian SKU</span>
+                                                </button>
                                             {/if}
                                         </td>
                                         <td class="p-3">
@@ -1602,163 +2229,78 @@
         </div>
     </div>
 
-    <!-- Quick Bulk Create Missing Products Modal -->
-    {#if isQuickCreateOpen}
+    <!-- Modal Spinner Loading: Chunked Import Streaming -->
+    {#if isImporting}
         <div
-            class="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4"
+            class="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-sm flex items-center justify-center p-4"
         >
             <div
-                class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 max-w-2xl w-full shadow-2xl space-y-6"
+                class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-8 max-w-md w-full shadow-2xl text-center space-y-6"
             >
-                <div
-                    class="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-4"
-                >
-                    <div class="flex items-center gap-2">
-                        <Sparkles class="w-6 h-6 text-amber-500" />
-                        <div>
-                            <h3
-                                class="text-base font-bold text-slate-800 dark:text-slate-100"
-                            >
-                                Auto-Generate Missing Products & Variants
-                            </h3>
-                            <p class="text-xs text-slate-400">
-                                Buat {missingSkusList.length} produk & varian baru
-                                secara massal instan
-                            </p>
+                <!-- Animated Spinner & Pulse Ring -->
+                <div class="relative w-20 h-20 mx-auto flex items-center justify-center">
+                    <div class="absolute inset-0 rounded-full bg-cyan-500/20 animate-ping"></div>
+                    <div class="w-16 h-16 rounded-2xl bg-gradient-to-tr from-cyan-500 to-rose-500 p-0.5 flex items-center justify-center shadow-lg shadow-cyan-500/30">
+                        <div class="w-full h-full bg-white dark:bg-slate-900 rounded-[14px] flex items-center justify-center">
+                            <RefreshCw class="w-8 h-8 text-cyan-500 animate-spin" />
                         </div>
                     </div>
-                    <button
-                        onclick={() => (isQuickCreateOpen = false)}
-                        class="text-slate-400 hover:text-slate-600"
-                    >
-                        <X class="w-5 h-5" />
-                    </button>
                 </div>
 
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
-                    <div>
-                        <label
-                            for="quick-seller"
-                            class="font-bold text-slate-700 dark:text-slate-300"
-                            >Pilih Mitra Seller <span class="text-rose-500"
-                                >*</span
-                            ></label
-                        >
-                        <select
-                            id="quick-seller"
-                            bind:value={quickSellerId}
-                            class="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 p-2.5 mt-1 font-semibold"
-                        >
-                            {#each sellers as s}
-                                <option value={s.id}>{s.seller_name}</option>
-                            {/each}
-                        </select>
-                    </div>
+                <!-- Text & Subtitle -->
+                <div class="space-y-1.5">
+                    <h3 class="text-base font-extrabold text-slate-800 dark:text-slate-100">
+                        Proses Chunked Import Streaming...
+                    </h3>
+                    <p class="text-xs font-medium text-slate-500 dark:text-slate-400 leading-relaxed">
+                        {importStatusText || "Memproses dan mencocokkan SKU pesanan dengan stok gudang..."}
+                    </p>
+                </div>
 
-                    <div>
-                        <label
-                            for="quick-category"
-                            class="font-bold text-slate-700 dark:text-slate-300"
-                            >Kategori Produk</label
-                        >
-                        <select
-                            id="quick-category"
-                            bind:value={quickCategoryId}
-                            class="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 p-2.5 mt-1"
-                        >
-                            <option value="">Pilih Kategori</option>
-                            {#each categories as c}
-                                <option value={c.id}>{c.name}</option>
-                            {/each}
-                        </select>
+                <!-- Progress Bar & Percentage -->
+                <div class="space-y-2">
+                    <div class="flex justify-between items-center text-xs font-bold">
+                        <span class="text-slate-600 dark:text-slate-300">
+                            Chunk {importCurrentChunk} dari {importTotalChunks || 1}
+                        </span>
+                        <span class="text-cyan-600 dark:text-cyan-400 text-sm">
+                            {importProgress}%
+                        </span>
                     </div>
-
-                    <div>
-                        <label
-                            for="quick-brand"
-                            class="font-bold text-slate-700 dark:text-slate-300"
-                            >Brand</label
-                        >
-                        <select
-                            id="quick-brand"
-                            bind:value={quickBrandId}
-                            class="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 p-2.5 mt-1"
-                        >
-                            <option value="">Pilih Brand</option>
-                            {#each brands as b}
-                                <option value={b.id}>{b.name}</option>
-                            {/each}
-                        </select>
-                    </div>
-
-                    <div>
-                        <label
-                            for="quick-template"
-                            class="font-bold text-slate-700 dark:text-slate-300"
-                            >Template Size/Varian</label
-                        >
-                        <select
-                            id="quick-template"
-                            bind:value={quickTemplateId}
-                            class="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 p-2.5 mt-1"
-                        >
-                            <option value="">Standard (ALL SIZE)</option>
-                            {#each templates as t}
-                                <option value={t.id}>{t.template_name}</option>
-                            {/each}
-                        </select>
+                    <div class="w-full bg-slate-100 dark:bg-slate-800 h-3 rounded-full overflow-hidden p-0.5 border border-slate-200/50 dark:border-slate-700/50">
+                        <div
+                            class="bg-gradient-to-r from-cyan-500 via-rose-500 to-pink-500 h-full transition-all duration-300 rounded-full"
+                            style="width: {importProgress}%"
+                        ></div>
                     </div>
                 </div>
 
-                <!-- Missing SKUs Preview Table -->
-                <div
-                    class="max-h-48 overflow-y-auto border border-slate-200 dark:border-slate-800 rounded-xl p-3 bg-slate-50 dark:bg-slate-950 space-y-2"
-                >
-                    <span class="text-[11px] font-bold text-slate-500 uppercase"
-                        >Daftar SKU yang Akan Dibuat:</span
-                    >
-                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                        {#each missingSkusList as m}
-                            <div
-                                class="p-2 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-800"
-                            >
-                                <div
-                                    class="font-mono font-bold text-rose-600 dark:text-rose-400"
-                                >
-                                    {m.sku}
-                                </div>
-                                <div
-                                    class="text-[11px] text-slate-600 dark:text-slate-400 truncate"
-                                >
-                                    {m.product_name}
-                                </div>
-                            </div>
-                        {/each}
+                <!-- Live Metrics Grid -->
+                <div class="grid grid-cols-3 gap-2 pt-2 border-t border-slate-100 dark:border-slate-800 text-center">
+                    <div class="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-slate-100 dark:border-slate-800/60">
+                        <span class="text-[10px] font-bold text-slate-400 block uppercase">Total Data</span>
+                        <span class="text-xs font-extrabold text-slate-700 dark:text-slate-200 font-mono">
+                            {importTotalItems}
+                        </span>
+                    </div>
+                    <div class="p-2.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-100 dark:border-emerald-900/40">
+                        <span class="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 block uppercase">Matched</span>
+                        <span class="text-xs font-extrabold text-emerald-700 dark:text-emerald-300 font-mono">
+                            {importMatchedCount}
+                        </span>
+                    </div>
+                    <div class="p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-100 dark:border-amber-900/40">
+                        <span class="text-[10px] font-bold text-amber-600 dark:text-amber-400 block uppercase">Missing</span>
+                        <span class="text-xs font-extrabold text-amber-700 dark:text-amber-300 font-mono">
+                            {importMissingCount}
+                        </span>
                     </div>
                 </div>
 
-                <div class="flex justify-end gap-3 pt-2">
-                    <button
-                        onclick={() => (isQuickCreateOpen = false)}
-                        class="px-4 py-2 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-bold text-xs rounded-xl"
-                        >Batal</button
-                    >
-                    <button
-                        onclick={handleQuickCreateProducts}
-                        disabled={isQuickCreating}
-                        class="px-5 py-2 bg-gradient-to-r from-amber-500 to-rose-600 text-white font-extrabold text-xs rounded-xl shadow-md flex items-center gap-1.5"
-                    >
-                        {#if isQuickCreating}
-                            <RefreshCw class="w-4 h-4 animate-spin" />
-                            <span>Memproses Dibuat...</span>
-                        {:else}
-                            <Sparkles class="w-4 h-4" />
-                            <span>Generate Products Instan</span>
-                        {/if}
-                    </button>
-                </div>
+                <p class="text-[11px] text-slate-400 dark:text-slate-500 italic">
+                    Mohon tunggu sebentar, jangan menutup atau memuat ulang halaman...
+                </p>
             </div>
         </div>
-        {#if false}{/if}
     {/if}
 </AdminLayout>
