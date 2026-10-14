@@ -45,12 +45,14 @@ class ProductBySellerController extends Controller
                 ->with(['seller', 'brand', 'category', 'konveksi', 'variants'])
                 ->where('seller_id', $sellerId)
                 ->when($search, function ($q) use ($search) {
-                    $q->where('product_name', 'like', "%{$search}%")
-                        ->orWhere('sku', 'like', "%{$search}%")
-                        ->orWhereHas('variants', function ($vq) use ($search) {
-                            $vq->where('sku', 'like', "%{$search}%")
-                                ->orWhere('barcode', 'like', "%{$search}%");
-                        });
+                    $q->where(function ($sub) use ($search) {
+                        $sub->where('product_name', 'like', "%{$search}%")
+                            ->orWhere('sku', 'like', "%{$search}%")
+                            ->orWhereHas('variants', function ($vq) use ($search) {
+                                $vq->where('sku', 'like', "%{$search}%")
+                                    ->orWhere('barcode', 'like', "%{$search}%");
+                            });
+                    });
                 })
                 ->latest()
                 ->paginate(12)

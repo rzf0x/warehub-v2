@@ -478,7 +478,11 @@
     async function copyAllSkusOnly() {
         if (missingSkusList.length === 0) return;
         const text = missingSkusList
-            .map((m) => m.sku)
+            .map((m) => {
+                if (!m.sku) return null;
+                const sizesStr = m.sizes && m.sizes.length > 0 ? m.sizes.join(", ") : (m.variation || "");
+                return sizesStr ? `${m.sku} (Size: ${sizesStr})` : m.sku;
+            })
             .filter(Boolean)
             .join("\n");
         await navigator.clipboard.writeText(text);
@@ -1389,14 +1393,14 @@
                                     type="button"
                                     onclick={copyAllSkusOnly}
                                     class="px-3 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-bold rounded-xl flex items-center gap-1.5 transition-all"
-                                    title="Copy hanya daftar teks SKU saja"
+                                    title="Copy daftar SKU beserta ukuran (size)"
                                 >
                                     {#if isCopiedAllSkus}
                                         <CheckCheck class="w-4 h-4 text-emerald-500" />
                                         <span>Tersalin!</span>
                                     {:else}
                                         <Copy class="w-4 h-4" />
-                                        <span>List SKU Saja</span>
+                                        <span>List SKU & Ukuran</span>
                                     {/if}
                                 </button>
                             </div>

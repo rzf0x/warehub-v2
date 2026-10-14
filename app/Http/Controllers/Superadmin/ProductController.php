@@ -31,12 +31,14 @@ class ProductController extends Controller
         $products = Product::query()
             ->with(['seller', 'brand', 'category', 'konveksi', 'variants'])
             ->when($search, function ($query, $s) {
-                $query->where('product_name', 'like', "%{$s}%")
-                    ->orWhere('sku', 'like', "%{$s}%")
-                    ->orWhereHas('variants', function ($vq) use ($s) {
-                        $vq->where('sku', 'like', "%{$s}%")
-                            ->orWhere('barcode', 'like', "%{$s}%");
-                    });
+                $query->where(function ($sub) use ($s) {
+                    $sub->where('product_name', 'like', "%{$s}%")
+                        ->orWhere('sku', 'like', "%{$s}%")
+                        ->orWhereHas('variants', function ($vq) use ($s) {
+                            $vq->where('sku', 'like', "%{$s}%")
+                                ->orWhere('barcode', 'like', "%{$s}%");
+                        });
+                });
             })
             ->when($sellerId, fn($q) => $q->where('seller_id', $sellerId))
             ->when($brandId, fn($q) => $q->where('brand_id', $brandId))
