@@ -569,6 +569,17 @@
                 (chunkIdx + 1) * chunkSize,
             );
 
+            // Sanitasi payload: hanya kirim field yang diperlukan backend agar ringan & tidak terblokir ModSecurity
+            const sanitizedChunk = chunk.map((it: any) => ({
+                "No. Pesanan": it["No. Pesanan"] || it["Order ID"] || it["order_id"] || "",
+                "No. Resi": it["No. Resi"] || it["Tracking ID"] || it["resi"] || "",
+                "Nomor Referensi SKU": it["Nomor Referensi SKU"] || it["Seller SKU"] || it["SKU Induk"] || it["sku"] || "",
+                "Nama Variasi": it["Nama Variasi"] || it["Variation"] || "",
+                "Nama Produk": it["Nama Produk"] || it["Product Name"] || "",
+                "Jumlah": it["Jumlah"] || it["Quantity"] || it["Qty"] || 1,
+                "Total Pembayaran": it["Total Pembayaran"] || it["Subtotal Pesanan"] || 0,
+            }));
+
             try {
                 const response = await fetch(
                     "/superadmin/warehouse/stock-out/import-chunked",
@@ -577,21 +588,30 @@
                         headers: {
                             "Content-Type": "application/json",
                             Accept: "application/json",
-                            "X-CSRF-TOKEN":
-                                (
-                                    document.querySelector(
-                                        'meta[name="csrf-token"]',
-                                    ) as HTMLMetaElement
-                                )?.content || "",
+                            "X-Requested-With": "XMLHttpRequest",
+                            "X-CSRF-TOKEN": getCsrfHeader(),
                         },
                         body: JSON.stringify({
                             warehouse_id: warehouseId,
-                            items: chunk,
+                            items: sanitizedChunk,
                         }),
                     },
                 );
 
-                const resData = await response.json();
+                const resText = await response.text();
+                let resData: any;
+                try {
+                    resData = JSON.parse(resText);
+                } catch (parseErr) {
+                    console.error("Respon bukan JSON:", resText);
+                    if (response.status === 403) {
+                        throw new Error("Akses ditolak (HTTP 403 Forbidden). Firewall server/ModSecurity memblokir request atau akun belum diverifikasi.");
+                    }
+                    if (response.status === 419) {
+                        throw new Error("Sesi browser kedaluwarsa (419). Silakan refresh halaman.");
+                    }
+                    throw new Error(`Server mengembalikan status HTTP ${response.status}`);
+                }
                 if (resData.success) {
                     if (Array.isArray(resData.matched_items)) {
                         resData.matched_items.forEach((m: any) => {
