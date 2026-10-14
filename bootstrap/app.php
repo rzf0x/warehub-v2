@@ -35,6 +35,10 @@ return Application::configure(basePath: dirname(__DIR__))
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->respond(function (Response $response, Throwable $exception, Request $request) {
+            if ($request->expectsJson() || $request->isJson() || $request->ajax() || $request->is('*/quick-adjust-stock*') || $request->is('*/process-orders*')) {
+                return $response;
+            }
+
             if (in_array($response->getStatusCode(), [500, 503, 404, 403])) {
                 return Inertia::render('Error', ['status' => $response->getStatusCode()])
                     ->toResponse($request)

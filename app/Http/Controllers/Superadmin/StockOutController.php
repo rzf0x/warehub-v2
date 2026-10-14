@@ -741,25 +741,58 @@ class StockOutController extends Controller
         $newStockQty = 0;
 
         DB::transaction(function () use ($warehouseId, $variantId, $addQty, $note, &$newStockQty) {
-            $stockRecord = Stock::firstOrCreate(
-                ['warehouse_id' => $warehouseId, 'product_variant_id' => $variantId],
-                ['qty' => 0, 'allocated_qty' => 0]
-            );
+            $stockRecord = Stock::where('warehouse_id', $warehouseId)
+                ->where('product_variant_id', $variantId)
+                ->first();
+
+            if (!$stockRecord) {
+                $stockRecord = new Stock();
+                $stockRecord->warehouse_id = $warehouseId;
+                $stockRecord->product_variant_id = $variantId;
+                $stockRecord->qty = 0;
+                if (\Illuminate\Support\Facades\Schema::hasColumn('stocks', 'allocated_qty')) {
+                    $stockRecord->allocated_qty = 0;
+                }
+                $stockRecord->save();
+            }
 
             $qtyBefore = (int)$stockRecord->qty;
             $stockRecord->increment('qty', $addQty);
             $newStockQty = (int)$stockRecord->fresh()->qty;
 
-            StockLog::create([
-                'product_variant_id' => $variantId,
-                'warehouse_id' => $warehouseId,
-                'reference_type' => StockOut::class,
-                'reference_id' => null,
-                'qty_before' => $qtyBefore,
-                'qty_change' => $addQty,
-                'qty_after' => $newStockQty,
-                'note' => $note,
-            ]);
+            try {
+                $logData = [
+                    'stock_id' => $stockRecord->id,
+                    'user_id' => auth()->id() ?? 1,
+                    'type' => 'MANUAL_ADD',
+                    'quantity_before' => $qtyBefore,
+                    'quantity_after' => $newStockQty,
+                    'change_amount' => $addQty,
+                    'note' => $note,
+                    'reference_type' => StockOut::class,
+                    'reference_id' => null,
+                ];
+
+                if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'product_variant_id')) {
+                    $logData['product_variant_id'] = $variantId;
+                }
+                if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'warehouse_id')) {
+                    $logData['warehouse_id'] = $warehouseId;
+                }
+                if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'qty_before')) {
+                    $logData['qty_before'] = $qtyBefore;
+                }
+                if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'qty_change')) {
+                    $logData['qty_change'] = $addQty;
+                }
+                if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'qty_after')) {
+                    $logData['qty_after'] = $newStockQty;
+                }
+
+                StockLog::create($logData);
+            } catch (\Throwable $e) {
+                \Log::warning("Gagal mencatat StockLog: " . $e->getMessage());
+            }
         });
 
         return response()->json([
@@ -788,25 +821,58 @@ class StockOutController extends Controller
                 $variantId = (int)$item['variant_id'];
                 $addQty = (int)$item['add_qty'];
 
-                $stockRecord = Stock::firstOrCreate(
-                    ['warehouse_id' => $warehouseId, 'product_variant_id' => $variantId],
-                    ['qty' => 0, 'allocated_qty' => 0]
-                );
+                $stockRecord = Stock::where('warehouse_id', $warehouseId)
+                    ->where('product_variant_id', $variantId)
+                    ->first();
+
+                if (!$stockRecord) {
+                    $stockRecord = new Stock();
+                    $stockRecord->warehouse_id = $warehouseId;
+                    $stockRecord->product_variant_id = $variantId;
+                    $stockRecord->qty = 0;
+                    if (\Illuminate\Support\Facades\Schema::hasColumn('stocks', 'allocated_qty')) {
+                        $stockRecord->allocated_qty = 0;
+                    }
+                    $stockRecord->save();
+                }
 
                 $qtyBefore = (int)$stockRecord->qty;
                 $stockRecord->increment('qty', $addQty);
                 $newStockQty = (int)$stockRecord->fresh()->qty;
 
-                StockLog::create([
-                    'product_variant_id' => $variantId,
-                    'warehouse_id' => $warehouseId,
-                    'reference_type' => StockOut::class,
-                    'reference_id' => null,
-                    'qty_before' => $qtyBefore,
-                    'qty_change' => $addQty,
-                    'qty_after' => $newStockQty,
-                    'note' => 'Penyesuaian stok massal dari form Stock Out',
-                ]);
+                try {
+                    $logData = [
+                        'stock_id' => $stockRecord->id,
+                        'user_id' => auth()->id() ?? 1,
+                        'type' => 'MANUAL_ADD',
+                        'quantity_before' => $qtyBefore,
+                        'quantity_after' => $newStockQty,
+                        'change_amount' => $addQty,
+                        'note' => 'Penyesuaian stok massal dari form Stock Out',
+                        'reference_type' => StockOut::class,
+                        'reference_id' => null,
+                    ];
+
+                    if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'product_variant_id')) {
+                        $logData['product_variant_id'] = $variantId;
+                    }
+                    if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'warehouse_id')) {
+                        $logData['warehouse_id'] = $warehouseId;
+                    }
+                    if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'qty_before')) {
+                        $logData['qty_before'] = $qtyBefore;
+                    }
+                    if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'qty_change')) {
+                        $logData['qty_change'] = $addQty;
+                    }
+                    if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'qty_after')) {
+                        $logData['qty_after'] = $newStockQty;
+                    }
+
+                    StockLog::create($logData);
+                } catch (\Throwable $e) {
+                    \Log::warning("Gagal mencatat StockLog bulk: " . $e->getMessage());
+                }
 
                 $updatedList[$variantId] = $newStockQty;
             }
