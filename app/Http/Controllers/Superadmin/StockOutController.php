@@ -1213,16 +1213,328 @@ class StockOutController extends Controller
         ]);
     }
 
-    public function settlement()
+    public function settlement(Request $request)
     {
-        $settlements = StockOut::with(['store', 'warehouse'])
-            ->select('store_id', DB::raw('SUM(total_selling_price) as gross_sales'), DB::raw('COUNT(id) as total_orders'))
-            ->groupBy('store_id')
+        $periodId = $request->input('period_id');
+        $sellerId = $request->input('seller_id');
+        $konveksiId = $request->input('konveksi_id');
+
+        $periods = Period::select('id', 'name', 'start_date', 'end_date')
+            ->orderBy('start_date', 'desc')
+            ->get();
+        $sellers = Seller::select('id', 'seller_name')
+            ->orderBy('seller_name', 'asc')
+            ->get();
+        $konveksis = Konveksi::select('id', 'name')
+            ->orderBy('name', 'asc')
             ->get();
 
-        return Inertia::render('Superadmin/Warehouse/StockOut/StockOutSettlement', [
-            'settlements' => $settlements,
+        $query = StockOut::with([
+            'period',
+            'store.seller',
+            'items.konveksi',
+            'items.productVariant.product.seller',
+            'items.productVariant.product.konveksi',
         ]);
+
+        if ($periodId) {
+            $query->where('period_id', $periodId);
+        }
+
+        if ($sellerId) {
+            $query->where(function ($sq) use ($sellerId) {
+                $sq->whereHas('store', fn($st) => $st->where('seller_id', $sellerId))
+                   ->orWhereHas('items.productVariant.product', fn($pq) => $pq->where('seller_id', $sellerId));
+            });
+        }
+
+        if ($konveksiId) {
+            $query->whereHas('items', function ($iq) use ($konveksiId) {
+                $iq->where('konveksi_id', $konveksiId)
+                   ->orWhereHas('productVariant.product', fn($pq) => $pq->where('konveksi_id', $konveksiId));
+            });
+        }
+
+        $stockOuts = $query->orderBy('date', 'desc')->orderBy('id', 'desc')->get();
+
+        // Hierarchical grouping: Period -> Seller -> Store -> Fakturs (with Konveksi Breakdown)
+        $periodsGrouped = [];
+        $grandTotalPcs = 0;
+        $grandTotalNominal = 0;
+        $grandTotalFakturs = 0;
+
+        foreach ($stockOuts as $so) {
+            // Filter items by konveksi if filter is active
+            $matchingItems = $so->items;
+            if ($konveksiId) {
+                $matchingItems = $matchingItems->filter(function ($item) use ($konveksiId) {
+                    return $item->konveksi_id == $konveksiId ||
+                        ($item->productVariant && $item->productVariant->product && $item->productVariant->product->konveksi_id == $konveksiId);
+                });
+            }
+
+            $soPcs = (int) $matchingItems->sum('qty');
+            if ($konveksiId) {
+                $soNominal = (float) $matchingItems->sum(fn($i) => (float)($i->qty * $i->selling_price));
+            } else {
+                $soNominal = (float) ($so->total_selling_price > 0
+                    ? $so->total_selling_price
+                    : $matchingItems->sum(fn($i) => (float)($i->qty * $i->selling_price)));
+            }
+
+            if ($soPcs <= 0 && $konveksiId) {
+                continue;
+            }
+
+            // Calculate per-konveksi breakdown for this stock out
+            $soKonveksi = [];
+            foreach ($matchingItems as $item) {
+                $kId = $item->konveksi_id ?: ($item->productVariant?->product?->konveksi_id ?: 0);
+                $kName = $item->konveksi?->name ?: ($item->productVariant?->product?->konveksi?->name ?: 'Tanpa Konveksi');
+
+                if (!isset($soKonveksi[$kId])) {
+                    $soKonveksi[$kId] = [
+                        'konveksi_id' => $kId,
+                        'name' => $kName,
+                        'pcs' => 0,
+                        'nominal' => 0,
+                    ];
+                }
+                $soKonveksi[$kId]['pcs'] += (int) $item->qty;
+                $soKonveksi[$kId]['nominal'] += (float) ($item->qty * $item->selling_price);
+            }
+
+            // Period group
+            $pId = $so->period_id ?? 0;
+            $pName = $so->period?->name ?? 'Tanpa Periode / Umum';
+            $pStartDate = $so->period?->start_date ? $so->period->start_date->format('d M Y') : null;
+            $pEndDate = $so->period?->end_date ? $so->period->end_date->format('d M Y') : null;
+
+            if (!isset($periodsGrouped[$pId])) {
+                $periodsGrouped[$pId] = [
+                    'period_id' => $so->period_id,
+                    'period_name' => $pName,
+                    'start_date' => $pStartDate,
+                    'end_date' => $pEndDate,
+                    'total_pcs' => 0,
+                    'total_nominal' => 0,
+                    'total_fakturs' => 0,
+                    'konveksis' => [],
+                    'sellers' => [],
+                ];
+            }
+
+            // Seller group
+            $sId = null;
+            $sName = 'Umum / Non-Seller';
+            if ($so->store && $so->store->seller) {
+                $sId = $so->store->seller->id;
+                $sName = $so->store->seller->seller_name;
+            } else {
+                foreach ($matchingItems as $item) {
+                    if ($item->productVariant?->product?->seller) {
+                        $sId = $item->productVariant->product->seller->id;
+                        $sName = $item->productVariant->product->seller->seller_name;
+                        break;
+                    }
+                }
+            }
+
+            if ($sellerId && $sId != $sellerId) {
+                continue;
+            }
+
+            $sellerKey = $sId ?? 0;
+            if (!isset($periodsGrouped[$pId]['sellers'][$sellerKey])) {
+                $periodsGrouped[$pId]['sellers'][$sellerKey] = [
+                    'seller_id' => $sId,
+                    'seller_name' => $sName,
+                    'total_pcs' => 0,
+                    'total_nominal' => 0,
+                    'konveksis' => [],
+                    'stores' => [],
+                ];
+            }
+
+            // Store group
+            $storeId = $so->store_id ?? 0;
+            $storeName = $so->store?->store_name ?? 'Penjualan Direct / Tanpa Toko';
+            $marketplace = $so->store?->marketplace ?? 'OFFLINE';
+
+            if (!isset($periodsGrouped[$pId]['sellers'][$sellerKey]['stores'][$storeId])) {
+                $periodsGrouped[$pId]['sellers'][$sellerKey]['stores'][$storeId] = [
+                    'store_id' => $so->store_id,
+                    'store_name' => $storeName,
+                    'marketplace' => strtoupper($marketplace),
+                    'total_pcs' => 0,
+                    'nominal_pelunasan' => 0,
+                    'total_fakturs' => 0,
+                    'konveksis' => [],
+                    'fakturs' => [],
+                ];
+            }
+
+            // Format Resi cleanly (handles raw marketplace JSON string)
+            $resiInfo = $this->formatResiSummary($so->resi_summary);
+
+            $noFaktur = 'OUT-' . str_pad((string)$so->id, 5, '0', STR_PAD_LEFT);
+            $fakturItem = [
+                'id' => $so->id,
+                'no_faktur' => $noFaktur,
+                'date' => $so->date ? $so->date->format('d M Y') : '-',
+                'resi_info' => $resiInfo,
+                'pcs' => $soPcs,
+                'nominal' => $soNominal,
+                'note' => $so->note,
+                'konveksis' => array_values($soKonveksi),
+                'pdf_url' => route('superadmin.warehouse.stock-out.pdf', $so->id),
+            ];
+
+            // Accumulate Konveksi breakdown to Store, Seller, and Period
+            foreach ($soKonveksi as $kId => $kData) {
+                // Store level
+                if (!isset($periodsGrouped[$pId]['sellers'][$sellerKey]['stores'][$storeId]['konveksis'][$kId])) {
+                    $periodsGrouped[$pId]['sellers'][$sellerKey]['stores'][$storeId]['konveksis'][$kId] = [
+                        'konveksi_id' => $kId,
+                        'name' => $kData['name'],
+                        'pcs' => 0,
+                        'nominal' => 0,
+                    ];
+                }
+                $periodsGrouped[$pId]['sellers'][$sellerKey]['stores'][$storeId]['konveksis'][$kId]['pcs'] += $kData['pcs'];
+                $periodsGrouped[$pId]['sellers'][$sellerKey]['stores'][$storeId]['konveksis'][$kId]['nominal'] += $kData['nominal'];
+
+                // Seller level
+                if (!isset($periodsGrouped[$pId]['sellers'][$sellerKey]['konveksis'][$kId])) {
+                    $periodsGrouped[$pId]['sellers'][$sellerKey]['konveksis'][$kId] = [
+                        'konveksi_id' => $kId,
+                        'name' => $kData['name'],
+                        'pcs' => 0,
+                        'nominal' => 0,
+                    ];
+                }
+                $periodsGrouped[$pId]['sellers'][$sellerKey]['konveksis'][$kId]['pcs'] += $kData['pcs'];
+                $periodsGrouped[$pId]['sellers'][$sellerKey]['konveksis'][$kId]['nominal'] += $kData['nominal'];
+
+                // Period level
+                if (!isset($periodsGrouped[$pId]['konveksis'][$kId])) {
+                    $periodsGrouped[$pId]['konveksis'][$kId] = [
+                        'konveksi_id' => $kId,
+                        'name' => $kData['name'],
+                        'pcs' => 0,
+                        'nominal' => 0,
+                    ];
+                }
+                $periodsGrouped[$pId]['konveksis'][$kId]['pcs'] += $kData['pcs'];
+                $periodsGrouped[$pId]['konveksis'][$kId]['nominal'] += $kData['nominal'];
+            }
+
+            // Accumulate counts and amounts
+            $periodsGrouped[$pId]['sellers'][$sellerKey]['stores'][$storeId]['fakturs'][] = $fakturItem;
+            $periodsGrouped[$pId]['sellers'][$sellerKey]['stores'][$storeId]['total_pcs'] += $soPcs;
+            $periodsGrouped[$pId]['sellers'][$sellerKey]['stores'][$storeId]['nominal_pelunasan'] += $soNominal;
+            $periodsGrouped[$pId]['sellers'][$sellerKey]['stores'][$storeId]['total_fakturs'] += 1;
+
+            $periodsGrouped[$pId]['sellers'][$sellerKey]['total_pcs'] += $soPcs;
+            $periodsGrouped[$pId]['sellers'][$sellerKey]['total_nominal'] += $soNominal;
+
+            $periodsGrouped[$pId]['total_pcs'] += $soPcs;
+            $periodsGrouped[$pId]['total_nominal'] += $soNominal;
+            $periodsGrouped[$pId]['total_fakturs'] += 1;
+
+            $grandTotalPcs += $soPcs;
+            $grandTotalNominal += $soNominal;
+            $grandTotalFakturs += 1;
+        }
+
+        // Convert associative keys to indexed lists
+        $resultPeriods = [];
+        foreach ($periodsGrouped as $p) {
+            $p['konveksis'] = array_values($p['konveksis']);
+            $sellersList = [];
+            foreach ($p['sellers'] as $s) {
+                $s['konveksis'] = array_values($s['konveksis']);
+                $storesList = [];
+                foreach ($s['stores'] as $st) {
+                    $st['konveksis'] = array_values($st['konveksis']);
+                    $storesList[] = $st;
+                }
+                $s['stores'] = $storesList;
+                $sellersList[] = $s;
+            }
+            $p['sellers'] = $sellersList;
+            $resultPeriods[] = $p;
+        }
+
+        $summary = [
+            'total_periods' => count($resultPeriods),
+            'grand_total_pcs' => $grandTotalPcs,
+            'grand_total_nominal' => $grandTotalNominal,
+            'grand_total_fakturs' => $grandTotalFakturs,
+        ];
+
+        return Inertia::render('Superadmin/Warehouse/StockOut/StockOutSettlement', [
+            'periods' => $periods,
+            'sellers' => $sellers,
+            'konveksis' => $konveksis,
+            'settlementPeriods' => $resultPeriods,
+            'summary' => $summary,
+            'filters' => [
+                'period_id' => $periodId ? (int)$periodId : null,
+                'seller_id' => $sellerId ? (int)$sellerId : null,
+                'konveksi_id' => $konveksiId ? (int)$konveksiId : null,
+            ],
+        ]);
+    }
+
+    private function formatResiSummary(?string $raw): array
+    {
+        if (!$raw || trim($raw) === '') {
+            return [
+                'total_resi' => 0,
+                'label' => '0 Resi',
+                'preview' => '-',
+                'sample_resis' => [],
+            ];
+        }
+
+        $trimmed = trim($raw);
+        if (str_starts_with($trimmed, '[') && str_ends_with($trimmed, ']')) {
+            $decoded = json_decode($trimmed, true);
+            if (is_array($decoded)) {
+                $resis = [];
+                foreach ($decoded as $entry) {
+                    if (is_array($entry) && !empty($entry['no_resi'])) {
+                        $resis[] = trim((string)$entry['no_resi']);
+                    } elseif (is_string($entry)) {
+                        $resis[] = trim($entry);
+                    }
+                }
+
+                $total = count($resis);
+                $firstFew = array_slice($resis, 0, 2);
+                $remaining = max(0, $total - count($firstFew));
+                $preview = implode(', ', $firstFew);
+                if ($remaining > 0) {
+                    $preview .= " (+{$remaining} resi)";
+                }
+
+                return [
+                    'total_resi' => $total,
+                    'label' => "{$total} Resi",
+                    'preview' => $preview ?: '-',
+                    'sample_resis' => array_slice($resis, 0, 10),
+                ];
+            }
+        }
+
+        $clean = \Illuminate\Support\Str::limit($trimmed, 80);
+        return [
+            'total_resi' => 1,
+            'label' => 'Manual',
+            'preview' => $clean,
+            'sample_resis' => [$clean],
+        ];
     }
 
     public function sellerDetail(Seller $seller)
