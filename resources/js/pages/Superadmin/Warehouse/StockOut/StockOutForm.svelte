@@ -486,7 +486,7 @@
         }, 2000);
     }
 
-    function handleJsonFileUpload(event: Event) {
+    async function handleJsonFileUpload(event: Event) {
         if (!warehouseId || !sellerId) {
             alert("Silakan pilih 1. Gudang Asal dan 2. Mitra Seller terlebih dahulu sebelum mengunggah file JSON!");
             const input = event.target as HTMLInputElement;
@@ -500,166 +500,109 @@
         const file = input.files[0];
         importedFileName = file.name;
 
-        const reader = new FileReader();
-        reader.onload = async (e) => {
-            try {
-                const parsed = JSON.parse(e.target?.result as string);
-                let rawItems: any[] = [];
-                if (parsed && typeof parsed === "object") {
-                    if (Array.isArray(parsed.data)) rawItems = parsed.data;
-                    else if (Array.isArray(parsed.orders))
-                        rawItems = parsed.orders;
-                    else if (Array.isArray(parsed.items))
-                        rawItems = parsed.items;
-                    else if (Array.isArray(parsed)) rawItems = parsed;
-                    else rawItems = [parsed];
-                }
-
-                if (!Array.isArray(rawItems) || rawItems.length === 0) {
-                    alert("File JSON tidak berisi data pesanan yang valid!");
-                    return;
-                }
-
-                // If JSON has top-level metrics, auto fill bruto
-                if (
-                    parsed.total_payment ||
-                    parsed.total_master_amount ||
-                    parsed.matched_master_amount
-                ) {
-                    bruto = Number(
-                        parsed.total_payment ||
-                            parsed.matched_master_amount ||
-                            parsed.total_master_amount ||
-                            0,
-                    );
-                }
-
-                await processImportChunks(rawItems);
-            } catch (err) {
-                alert("Format File JSON tidak valid!");
-                importedFileName = "";
-            }
-        };
-        reader.readAsText(file);
-    }
-
-    async function processImportChunks(allItems: any[]) {
+        // Tampilkan modal progress
         isImporting = true;
-        importProgress = 5;
-        importStatusText = "Mempersiapkan data pesanan...";
+        importProgress = 15;
+        importStatusText = `Mengunggah & menganalisis file ${file.name}...`;
         missingSkusList = [];
-        importTotalItems = allItems.length;
         importMatchedCount = 0;
         importMissingCount = 0;
+        importTotalChunks = 1;
+        importCurrentChunk = 1;
 
-        const chunkSize = 500;
-        const totalChunks = Math.ceil(allItems.length / chunkSize);
-        importTotalChunks = totalChunks;
-        const resolvedMatchedItems: FormItem[] = [];
-        const accumulatedResis: ResiItem[] = [];
-        const missingMap: Record<string, MissingSkuItem> = {};
+        try {
+            const formData = new FormData();
+            formData.append("file", file);
+            if (warehouseId) formData.append("warehouse_id", String(warehouseId));
+            formData.append("seller_id", String(sellerId));
 
-        for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
-            importCurrentChunk = chunkIdx + 1;
-            importStatusText = `Memproses chunk ${chunkIdx + 1} dari ${totalChunks}... (${allItems.length} baris pesanan)`;
-            importProgress = Math.round((chunkIdx / totalChunks) * 90);
+            importProgress = 40;
+            importStatusText = "Mencocokkan SKU pesanan dengan Database Master Gudang...";
 
-            const chunk = allItems.slice(
-                chunkIdx * chunkSize,
-                (chunkIdx + 1) * chunkSize,
-            );
+            const response = await fetch("/superadmin/warehouse/stock-out/process-orders", {
+                method: "POST",
+                headers: {
+                    "X-Requested-With": "XMLHttpRequest",
+                    "X-CSRF-TOKEN": getCsrfHeader(),
+                },
+                body: formData,
+            });
 
-            // Sanitasi payload: hanya kirim field yang diperlukan backend agar ringan & tidak terblokir ModSecurity
-            const sanitizedChunk = chunk.map((it: any) => ({
-                "No. Pesanan": it["No. Pesanan"] || it["Order ID"] || it["order_id"] || "",
-                "No. Resi": it["No. Resi"] || it["Tracking ID"] || it["resi"] || "",
-                "Nomor Referensi SKU": it["Nomor Referensi SKU"] || it["Seller SKU"] || it["SKU Induk"] || it["sku"] || "",
-                "Nama Variasi": it["Nama Variasi"] || it["Variation"] || "",
-                "Nama Produk": it["Nama Produk"] || it["Product Name"] || "",
-                "Jumlah": it["Jumlah"] || it["Quantity"] || it["Qty"] || 1,
-                "Total Pembayaran": it["Total Pembayaran"] || it["Subtotal Pesanan"] || 0,
-            }));
-
+            const resText = await response.text();
+            let resData: any;
             try {
-                const response = await fetch(
-                    "/superadmin/warehouse/stock-out/import-chunked",
-                    {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/json",
-                            Accept: "application/json",
-                            "X-Requested-With": "XMLHttpRequest",
-                            "X-CSRF-TOKEN": getCsrfHeader(),
-                        },
-                        body: JSON.stringify({
-                            warehouse_id: warehouseId,
-                            items: sanitizedChunk,
-                        }),
-                    },
-                );
-
-                const resText = await response.text();
-                let resData: any;
-                try {
-                    resData = JSON.parse(resText);
-                } catch (parseErr) {
-                    console.error("Respon bukan JSON:", resText);
-                    if (response.status === 403) {
-                        throw new Error("Akses ditolak (HTTP 403 Forbidden). Firewall server/ModSecurity memblokir request atau akun belum diverifikasi.");
-                    }
-                    if (response.status === 419) {
-                        throw new Error("Sesi browser kedaluwarsa (419). Silakan refresh halaman.");
-                    }
-                    throw new Error(`Server mengembalikan status HTTP ${response.status}`);
+                resData = JSON.parse(resText);
+            } catch (parseErr) {
+                console.error("Respon bukan JSON:", resText);
+                if (response.status === 403) {
+                    throw new Error("Akses ditolak (HTTP 403 Forbidden). Firewall server/ModSecurity memblokir request atau akun belum diverifikasi.");
                 }
-                if (resData.success) {
-                    if (Array.isArray(resData.matched_items)) {
-                        resData.matched_items.forEach((m: any) => {
-                            resolvedMatchedItems.push({
-                                product_variant_id: m.product_variant_id,
-                                konveksi_id: null,
-                                seller_id: m.seller_id || Number(sellerId),
-                                seller_name: m.seller_name || (sellers.find((s) => s.id === Number(sellerId))?.seller_name ?? "Mitra"),
-                                sku: m.sku,
-                                product_name: m.product_name,
-                                size: m.size,
-                                color: m.color,
-                                qty: m.qty,
-                                price: Number(m.price || 0),
-                                selling_price: Math.round(Number(m.selling_price || 0)),
-                                available_stock: m.available_stock,
-                            });
-                        });
-                    }
-
-                    if (Array.isArray(resData.missing_skus)) {
-                        resData.missing_skus.forEach((ms: any) => {
-                            missingMap[ms.sku] = ms;
-                        });
-                    }
-
-                    if (Array.isArray(resData.resis)) {
-                        accumulatedResis.push(...resData.resis);
-                    }
+                if (response.status === 419) {
+                    throw new Error("Sesi browser kedaluwarsa (419). Silakan refresh halaman.");
                 }
-            } catch (err) {
-                console.error("Error processing chunk:", err);
+                throw new Error(`Server mengembalikan status HTTP ${response.status}`);
             }
 
-            importMatchedCount = resolvedMatchedItems.length;
-            importMissingCount = Object.keys(missingMap).length;
-            importProgress = Math.round(((chunkIdx + 1) / totalChunks) * 100);
-        }
+            if (!resData.success) {
+                alert(resData.message || "Gagal memproses file pesanan.");
+                return;
+            }
 
-        formItems = consolidateFormItems(resolvedMatchedItems);
-        resiList = accumulatedResis;
-        missingSkusList = Object.values(missingMap);
+            importProgress = 85;
+            importStatusText = "Menyusun rincian item barang keluar...";
 
-        importProgress = 100;
-        importStatusText = `Selesai! Berhasil mencocokkan ${resolvedMatchedItems.length} item.`;
-        setTimeout(() => {
+            const resolvedMatchedItems: FormItem[] = [];
+            if (Array.isArray(resData.matched_items)) {
+                resData.matched_items.forEach((m: any) => {
+                    resolvedMatchedItems.push({
+                        product_variant_id: m.product_variant_id,
+                        konveksi_id: null,
+                        seller_id: m.seller_id || Number(sellerId),
+                        seller_name: m.seller_name || (sellers.find((s) => s.id === Number(sellerId))?.seller_name ?? "Mitra"),
+                        sku: m.sku,
+                        product_name: m.product_name,
+                        size: m.size,
+                        color: m.color,
+                        qty: m.qty,
+                        price: Number(m.price || 0),
+                        selling_price: Math.round(Number(m.selling_price || 0)),
+                        available_stock: m.available_stock,
+                    });
+                });
+            }
+
+            if (Array.isArray(resData.missing_skus)) {
+                missingSkusList = resData.missing_skus;
+                importMissingCount = resData.missing_skus.length;
+            }
+
+            if (Array.isArray(resData.resis)) {
+                resiList = resData.resis.map((r: any) => ({
+                    order_id: r.order_id,
+                    no_resi: r.no_resi,
+                    payment: r.payment,
+                }));
+            }
+
+            if (resData.suggested_bruto) {
+                bruto = Number(resData.suggested_bruto);
+            }
+
+            formItems = consolidateFormItems(resolvedMatchedItems);
+            importMatchedCount = formItems.length;
+            importProgress = 100;
+            importStatusText = `Selesai! Berhasil mencocokkan ${formItems.length} produk varian.`;
+
+            setTimeout(() => {
+                isImporting = false;
+            }, 600);
+        } catch (err: any) {
+            console.error("Import error:", err);
+            alert("Terjadi kesalahan saat memproses file JSON: " + (err?.message || "Koneksi bermasalah"));
+        } finally {
             isImporting = false;
-        }, 500);
+            input.value = "";
+        }
     }
 
     // Calculations & Validation Metrics

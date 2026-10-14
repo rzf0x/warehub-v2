@@ -386,15 +386,44 @@ class StockOutController extends Controller
         return redirect()->route('superadmin.warehouse.stock-out.index')->with('success', 'Transaksi Stok Keluar berhasil diperbarui.');
     }
 
-    public function importChunked(Request $request)
+    public function processOrders(Request $request)
     {
-        $request->validate([
-            'items' => ['required', 'array'],
-            'warehouse_id' => ['nullable', 'integer'],
-        ]);
-
-        $rawItems = $request->input('items', []);
         $warehouseId = $request->input('warehouse_id');
+        $rawItems = [];
+
+        $suggestedBruto = null;
+
+        if ($request->hasFile('file')) {
+            $file = $request->file('file');
+            $content = file_get_contents($file->getRealPath());
+            $decoded = json_decode($content, true);
+            if (is_array($decoded)) {
+                if (isset($decoded['data']) && is_array($decoded['data'])) {
+                    $rawItems = $decoded['data'];
+                } elseif (isset($decoded['orders']) && is_array($decoded['orders'])) {
+                    $rawItems = $decoded['orders'];
+                } elseif (isset($decoded['items']) && is_array($decoded['items'])) {
+                    $rawItems = $decoded['items'];
+                } else {
+                    $rawItems = $decoded;
+                }
+                $suggestedBruto = $decoded['bruto'] ?? $decoded['total_payment'] ?? $decoded['matched_master_amount'] ?? $decoded['total_master_amount'] ?? null;
+            }
+        } elseif ($request->filled('items') && is_array($request->input('items'))) {
+            $rawItems = $request->input('items');
+        } elseif ($request->isJson()) {
+            $rawItems = $request->json('items', []);
+        }
+
+        if (empty($rawItems)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Data pesanan kosong atau file JSON tidak valid.',
+                'matched_items' => [],
+                'missing_skus' => [],
+                'resis' => [],
+            ], 422);
+        }
 
         $variants = ProductVariant::with(['product.seller', 'stocks' => function ($q) use ($warehouseId) {
             if ($warehouseId) $q->where('warehouse_id', $warehouseId);
@@ -540,7 +569,13 @@ class StockOutController extends Controller
             'matched_items' => $matchedItems,
             'missing_skus' => array_values($missingSkus),
             'resis' => array_values($resisSet),
+            'suggested_bruto' => $suggestedBruto ? (float)$suggestedBruto : null,
         ]);
+    }
+
+    public function importChunked(Request $request)
+    {
+        return $this->processOrders($request);
     }
 
     private function parseSizeTokens(string $text): array

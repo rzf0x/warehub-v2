@@ -96,7 +96,8 @@ Route::middleware(['auth'])->group(function () {
             Route::get('stock-out/seller-detail/{seller}', [StockOutController::class, 'sellerDetail'])->name('stock-out.seller-detail');
             Route::get('stock-out/search-variants', [StockOutController::class, 'searchVariants'])->name('stock-out.search-variants');
             Route::get('stock-out/{stockOut}/pdf', [StockOutController::class, 'streamSuratJalan'])->name('stock-out.pdf');
-            Route::post('stock-out/import-chunked', [StockOutController::class, 'importChunked'])->name('stock-out.import-chunked');
+            Route::post('stock-out/process-orders', [StockOutController::class, 'processOrders'])->name('stock-out.process-orders');
+            Route::post('stock-out/import-chunked', [StockOutController::class, 'processOrders'])->name('stock-out.import-chunked');
             Route::post('stock-out/quick-create-products', [StockOutController::class, 'quickCreateProducts'])->name('stock-out.quick-create-products');
             Route::post('stock-out/quick-adjust-stock', [StockOutController::class, 'quickAdjustStock'])->name('stock-out.quick-adjust-stock');
             Route::post('stock-out/quick-adjust-stock-bulk', [StockOutController::class, 'quickAdjustStockBulk'])->name('stock-out.quick-adjust-stock-bulk');

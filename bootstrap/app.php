@@ -23,6 +23,7 @@ return Application::configure(basePath: dirname(__DIR__))
             'superadmin/warehouse/stock-out/quick-adjust-stock',
             'superadmin/warehouse/stock-out/quick-adjust-stock-bulk',
             'superadmin/warehouse/stock-out/import-chunked',
+            'superadmin/warehouse/stock-out/process-orders',
             'superadmin/warehouse/stock-out/quick-create-products',
         ]);
 
