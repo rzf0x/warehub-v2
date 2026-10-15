@@ -218,7 +218,7 @@
                     Settlement & Pelunasan Toko
                 </h1>
                 <p class="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-0.5">
-                    Rekapitulasi penjualan per periode, seller, toko marketplace, pcs terjual per konveksi, nominal pelunasan, dan nomor faktur.
+                    Rekapitulasi penjualan per periode, seller, toko marketplace, pcs terjual per konveksi, nominal pelunasan (HPP Modal), dan nomor faktur.
                 </p>
             </div>
         </div>
@@ -238,7 +238,7 @@
 
     <!-- Print-only Title -->
     <div class="hidden print:block mb-6 border-b border-slate-300 pb-3">
-        <h1 class="text-xl font-bold text-slate-900">Laporan Settlement & Pelunasan Toko Per-Periode</h1>
+        <h1 class="text-xl font-bold text-slate-900">Laporan Settlement & Pelunasan Toko Per-Periode (HPP Modal)</h1>
         <p class="text-xs text-slate-500">Warehub v2 Inventory & Settlement System</p>
     </div>
 
@@ -283,7 +283,7 @@
             <div class="text-xl sm:text-2xl font-extrabold text-emerald-600 dark:text-emerald-400 truncate">
                 {formatRupiah(summary.grand_total_nominal)}
             </div>
-            <div class="text-[11px] text-slate-400 mt-0.5">Total pencairan netto</div>
+            <div class="text-[11px] text-slate-400 mt-0.5">Total HPP (Modal)</div>
         </div>
 
         <!-- 4. Total Faktur Dokumen -->
@@ -430,7 +430,7 @@
                             </div>
                         </div>
                         <div class="rounded-xl bg-emerald-500/20 px-3.5 py-2 backdrop-blur-xs border border-emerald-400/30 text-right">
-                            <div class="text-[10px] uppercase font-bold tracking-wider text-emerald-200">Total Pelunasan</div>
+                            <div class="text-[10px] uppercase font-bold tracking-wider text-emerald-200">Total Pelunasan (HPP)</div>
                             <div class="text-base font-extrabold text-emerald-300">
                                 {formatRupiah(period.total_nominal)}
                             </div>
@@ -536,7 +536,7 @@
 
                                                 <!-- Nominal Pelunasan & Konveksi Breakdown -->
                                                 <div class="text-right">
-                                                    <div class="text-[11px] font-medium text-slate-400">Nominal Pelunasan</div>
+                                                    <div class="text-[11px] font-medium text-slate-400">Nominal Pelunasan (HPP)</div>
                                                     <div class="text-sm sm:text-base font-extrabold text-emerald-600 dark:text-emerald-400">
                                                         {formatRupiah(store.nominal_pelunasan)}
                                                     </div>
@@ -584,7 +584,7 @@
                                                                 <th class="px-3.5 py-2.5">Tanggal</th>
                                                                 <th class="px-3.5 py-2.5">Ringkasan Resi / Catatan</th>
                                                                 <th class="px-3.5 py-2.5 text-right">Pcs Terjual (Detail Konveksi)</th>
-                                                                <th class="px-3.5 py-2.5 text-right">Nominal Pelunasan (Detail Konveksi)</th>
+                                                                <th class="px-3.5 py-2.5 text-right">Nominal Pelunasan HPP (Detail Konveksi)</th>
                                                                 <th class="px-3.5 py-2.5 text-center">Surat Jalan</th>
                                                             </tr>
                                                         </thead>

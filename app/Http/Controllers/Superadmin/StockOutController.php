@@ -1380,18 +1380,18 @@ class StockOutController extends Controller
 
             $soPcs = (int) $matchingItems->sum('qty');
             if ($konveksiId) {
-                $soNominal = (float) $matchingItems->sum(fn($i) => (float)($i->qty * $i->selling_price));
+                $soNominal = (float) $matchingItems->sum(fn($i) => (float)($i->qty * $i->price));
             } else {
-                $soNominal = (float) ($so->total_selling_price > 0
-                    ? $so->total_selling_price
-                    : $matchingItems->sum(fn($i) => (float)($i->qty * $i->selling_price)));
+                $soNominal = (float) ($so->total_amount > 0
+                    ? $so->total_amount
+                    : $matchingItems->sum(fn($i) => (float)($i->qty * $i->price)));
             }
 
             if ($soPcs <= 0 && $konveksiId) {
                 continue;
             }
 
-            // Calculate per-konveksi breakdown for this stock out
+            // Calculate per-konveksi breakdown for this stock out based on HPP (Modal)
             $soKonveksi = [];
             foreach ($matchingItems as $item) {
                 $kId = $item->konveksi_id ?: ($item->productVariant?->product?->konveksi_id ?: 0);
@@ -1406,7 +1406,7 @@ class StockOutController extends Controller
                     ];
                 }
                 $soKonveksi[$kId]['pcs'] += (int) $item->qty;
-                $soKonveksi[$kId]['nominal'] += (float) ($item->qty * $item->selling_price);
+                $soKonveksi[$kId]['nominal'] += (float) ($item->qty * $item->price);
             }
 
             // Reconcile each konveksi's nominal proportionally so their sum matches $soNominal exactly
