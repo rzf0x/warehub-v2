@@ -412,6 +412,8 @@
                                         <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium bg-white/10 text-white border border-white/15">
                                             <span>{pk.name}:</span>
                                             <strong class="text-indigo-200">{formatNumber(pk.pcs)} pcs</strong>
+                                            <span class="text-white/30">•</span>
+                                            <strong class="text-emerald-300">{formatRupiah(pk.nominal)}</strong>
                                         </span>
                                     {/each}
                                 </div>
@@ -454,13 +456,29 @@
                                     </div>
                                 </div>
 
-                                <div class="flex items-center gap-2 self-start sm:self-auto text-xs font-semibold">
-                                    <span class="px-2.5 py-1 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
-                                        {formatNumber(seller.total_pcs)} pcs
-                                    </span>
-                                    <span class="px-2.5 py-1 rounded-lg bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 font-bold">
-                                        {formatRupiah(seller.total_nominal)}
-                                    </span>
+                                <div class="flex flex-col items-start sm:items-end gap-1.5 self-start sm:self-auto">
+                                    <div class="flex items-center gap-2 text-xs font-semibold">
+                                        <span class="px-2.5 py-1 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                                            {formatNumber(seller.total_pcs)} pcs
+                                        </span>
+                                        <span class="px-2.5 py-1 rounded-lg bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 font-bold">
+                                            {formatRupiah(seller.total_nominal)}
+                                        </span>
+                                    </div>
+
+                                    {#if seller.konveksis && seller.konveksis.length > 0}
+                                        <div class="flex flex-wrap gap-1 sm:justify-end">
+                                            {#each seller.konveksis as sk}
+                                                <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-800 shadow-2xs">
+                                                    <span class="text-indigo-400">🧵</span>
+                                                    <span>{sk.name}:</span>
+                                                    <span class="text-slate-500 font-medium">{formatNumber(sk.pcs)} pcs</span>
+                                                    <span class="text-slate-300 dark:text-slate-600">•</span>
+                                                    <span class="font-bold text-emerald-600 dark:text-emerald-400">{formatRupiah(sk.nominal)}</span>
+                                                </span>
+                                            {/each}
+                                        </div>
+                                    {/if}
                                 </div>
                             </div>
 
@@ -516,12 +534,25 @@
                                                     {/if}
                                                 </div>
 
-                                                <!-- Nominal Pelunasan -->
+                                                <!-- Nominal Pelunasan & Konveksi Breakdown -->
                                                 <div class="text-right">
                                                     <div class="text-[11px] font-medium text-slate-400">Nominal Pelunasan</div>
                                                     <div class="text-sm sm:text-base font-extrabold text-emerald-600 dark:text-emerald-400">
                                                         {formatRupiah(store.nominal_pelunasan)}
                                                     </div>
+
+                                                    <!-- Detail Breakdown Nominal per Konveksi -->
+                                                    {#if store.konveksis && store.konveksis.length > 0}
+                                                        <div class="mt-1 flex flex-wrap gap-1 justify-end">
+                                                            {#each store.konveksis as k}
+                                                                <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-300 border border-emerald-200/80 dark:border-emerald-800">
+                                                                    <span class="text-emerald-500">🧵</span>
+                                                                    <span>{k.name}:</span>
+                                                                    <span class="font-bold">{formatRupiah(k.nominal)}</span>
+                                                                </span>
+                                                            {/each}
+                                                        </div>
+                                                    {/if}
                                                 </div>
 
                                                 <!-- Toggle Button -->
@@ -536,9 +567,8 @@
                                             </div>
                                         </div>
 
-                                        <!-- Expandable Faktur List Details -->
-                                        {#if isExpanded}
-                                            <div class="border-t border-slate-100 dark:border-slate-800/80 bg-slate-50/70 dark:bg-slate-950/60 p-4">
+                                        <!-- Expandable Faktur List Details (Always visible on print) -->
+                                        <div class="{isExpanded ? 'block' : 'hidden print:block'} border-t border-slate-100 dark:border-slate-800/80 bg-slate-50/70 dark:bg-slate-950/60 p-4">
                                                 <div class="mb-2.5 flex items-center justify-between text-xs font-semibold text-slate-500 dark:text-slate-400">
                                                     <span class="flex items-center gap-1.5">
                                                         <FileText class="h-3.5 w-3.5 text-indigo-500" />
@@ -554,7 +584,7 @@
                                                                 <th class="px-3.5 py-2.5">Tanggal</th>
                                                                 <th class="px-3.5 py-2.5">Ringkasan Resi / Catatan</th>
                                                                 <th class="px-3.5 py-2.5 text-right">Pcs Terjual (Detail Konveksi)</th>
-                                                                <th class="px-3.5 py-2.5 text-right">Nominal Pelunasan</th>
+                                                                <th class="px-3.5 py-2.5 text-right">Nominal Pelunasan (Detail Konveksi)</th>
                                                                 <th class="px-3.5 py-2.5 text-center">Surat Jalan</th>
                                                             </tr>
                                                         </thead>
@@ -612,9 +642,23 @@
                                                                         {/if}
                                                                     </td>
 
-                                                                    <!-- Nominal Pelunasan -->
-                                                                    <td class="px-3.5 py-2.5 text-right font-extrabold text-emerald-600 dark:text-emerald-400 whitespace-nowrap align-top">
-                                                                        {formatRupiah(faktur.nominal)}
+                                                                    <!-- Nominal Pelunasan & Detail Konveksi -->
+                                                                    <td class="px-3.5 py-2.5 text-right whitespace-nowrap align-top">
+                                                                        <div class="font-extrabold text-emerald-600 dark:text-emerald-400 text-xs">
+                                                                            {formatRupiah(faktur.nominal)}
+                                                                        </div>
+
+                                                                        <!-- Breakdown Nominal per Konveksi pada Faktur ini -->
+                                                                        {#if faktur.konveksis && faktur.konveksis.length > 0}
+                                                                            <div class="mt-1 flex flex-col gap-0.5 items-end">
+                                                                                {#each faktur.konveksis as fk}
+                                                                                    <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-semibold bg-emerald-50 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-300 border border-emerald-200/80 dark:border-emerald-800">
+                                                                                        <span>🧵 {fk.name}:</span>
+                                                                                        <strong class="font-bold">{formatRupiah(fk.nominal)}</strong>
+                                                                                    </span>
+                                                                                {/each}
+                                                                            </div>
+                                                                        {/if}
                                                                     </td>
 
                                                                     <!-- Surat Jalan Link -->
@@ -635,8 +679,7 @@
                                                     </table>
                                                 </div>
                                             </div>
-                                        {/if}
-                                    </div>
+                                        </div>
                                 {/each}
                             </div>
                         </div>

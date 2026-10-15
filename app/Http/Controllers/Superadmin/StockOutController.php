@@ -1409,6 +1409,48 @@ class StockOutController extends Controller
                 $soKonveksi[$kId]['nominal'] += (float) ($item->qty * $item->selling_price);
             }
 
+            // Reconcile each konveksi's nominal proportionally so their sum matches $soNominal exactly
+            if (!empty($soKonveksi) && $soNominal != 0.0) {
+                $rawKonveksiSum = (float) array_sum(array_column($soKonveksi, 'nominal'));
+                $isIntegerNominal = (floor($soNominal) == $soNominal);
+                $precision = $isIntegerNominal ? 0 : 2;
+
+                $kKeys = array_keys($soKonveksi);
+                $lastKey = end($kKeys);
+                $accumulatedNominal = 0.0;
+
+                if ($rawKonveksiSum > 0) {
+                    $ratioScale = $soNominal / $rawKonveksiSum;
+                    foreach ($soKonveksi as $kId => &$kVal) {
+                        if ($kId === $lastKey) {
+                            $kVal['nominal'] = round($soNominal - $accumulatedNominal, $precision);
+                        } else {
+                            $scaledVal = round((float)$kVal['nominal'] * $ratioScale, $precision);
+                            $kVal['nominal'] = $scaledVal;
+                            $accumulatedNominal += $scaledVal;
+                        }
+                    }
+                    unset($kVal);
+                } elseif ($soPcs > 0) {
+                    foreach ($soKonveksi as $kId => &$kVal) {
+                        if ($kId === $lastKey) {
+                            $kVal['nominal'] = round($soNominal - $accumulatedNominal, $precision);
+                        } else {
+                            $pcsRatio = (float)$kVal['pcs'] / (float)$soPcs;
+                            $scaledVal = round($soNominal * $pcsRatio, $precision);
+                            $kVal['nominal'] = $scaledVal;
+                            $accumulatedNominal += $scaledVal;
+                        }
+                    }
+                    unset($kVal);
+                }
+            } elseif ($soNominal == 0.0) {
+                foreach ($soKonveksi as &$kVal) {
+                    $kVal['nominal'] = 0.0;
+                }
+                unset($kVal);
+            }
+
             // Period group
             $pId = $so->period_id ?? 0;
             $pName = $so->period?->name ?? 'Tanpa Periode / Umum';
