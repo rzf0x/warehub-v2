@@ -222,12 +222,34 @@
             if (stockOut.resi_summary) {
                 try {
                     const parsed = JSON.parse(stockOut.resi_summary);
-                    if (Array.isArray(parsed)) resiList = parsed;
+                    if (Array.isArray(parsed)) {
+                        const hasAnyPositive = parsed.some((r: any) => Number(r.payment || 0) > 0);
+                        if (!hasAnyPositive && Number(stockOut.total_selling_price || 0) > 0 && parsed.length > 0) {
+                            const perItem = Math.round(Number(stockOut.total_selling_price) / parsed.length);
+                            let running = 0;
+                            resiList = parsed.map((r: any, idx: number) => {
+                                const pay = idx === parsed.length - 1 ? (Number(stockOut.total_selling_price) - running) : perItem;
+                                running += pay;
+                                return {
+                                    order_id: r.order_id || "",
+                                    no_resi: r.no_resi || "",
+                                    payment: pay,
+                                };
+                            });
+                        } else {
+                            resiList = parsed.map((r: any) => ({
+                                order_id: r.order_id || "",
+                                no_resi: r.no_resi || "",
+                                payment: r.payment !== undefined && r.payment !== null ? Number(r.payment) : 0,
+                            }));
+                        }
+                    }
                 } catch (e) {
                     resiList = [
                         {
                             order_id: stockOut.resi_summary,
                             no_resi: stockOut.resi_summary,
+                            payment: Number(stockOut.total_selling_price || 0),
                         },
                     ];
                 }
@@ -390,14 +412,23 @@
     // Resi List Management
     let resiSearch = $state<string>("");
     let resiPage = $state<number>(1);
-    const resiPerPage = 20;
+    let resiPerPage = $state<number>(20);
 
     function addResiRow() {
-        resiList = [...resiList, { order_id: "", no_resi: "" }];
+        resiList = [
+            {
+                order_id: "",
+                no_resi: "",
+                payment: 0,
+            },
+            ...resiList,
+        ];
+        resiPage = 1;
+        resiSearch = "";
     }
 
-    function removeResiRow(idx: number) {
-        resiList = resiList.filter((_, i) => i !== idx);
+    function removeResiItem(item: ResiItem) {
+        resiList = resiList.filter((r) => r !== item);
     }
 
     let filteredResis = $derived(
@@ -681,7 +712,12 @@
             ),
         ),
     );
-    let liveTotalSelling = $derived(
+    let totalResiPayment = $derived(
+        Math.round(
+            resiList.reduce((acc, r) => acc + (Number(r.payment) || 0), 0),
+        ),
+    );
+    let itemsTotalSelling = $derived(
         Math.round(
             formItems.reduce(
                 (acc, i) =>
@@ -689,6 +725,17 @@
                 0,
             ),
         ),
+    );
+    let hasResiPayments = $derived(
+        resiList.some(
+            (r) =>
+                r.payment !== undefined &&
+                r.payment !== null &&
+                Number(r.payment) !== 0,
+        ),
+    );
+    let liveTotalSelling = $derived(
+        hasResiPayments ? totalResiPayment : itemsTotalSelling,
     );
     let liveBruto = $derived(bruto > 0 ? bruto : liveTotalSelling);
     let liveMarketplaceFees = $derived(Math.max(0, liveBruto - liveTotalSelling));
@@ -963,7 +1010,13 @@
 
         const resiSummaryStr =
             resiList.length > 0
-                ? JSON.stringify(resiList)
+                ? JSON.stringify(
+                      resiList.map((r) => ({
+                          order_id: (r.order_id || "").trim(),
+                          no_resi: (r.no_resi || "").trim(),
+                          payment: Number(r.payment) || 0,
+                      })),
+                  )
                 : note ||
                   `Manual Out ${new Date().toISOString().split("T")[0]}`;
 
@@ -974,6 +1027,7 @@
             date: date,
             note: note,
             bruto: liveBruto,
+            total_selling_price: liveTotalSelling,
             resi_summary: resiSummaryStr,
             items: formItems.map((i) => ({
                 product_variant_id: i.product_variant_id,
@@ -2152,7 +2206,7 @@
                                                             <input
                                                                 type="text"
                                                                 bind:value={variantSearchQuery}
-                                                                oninput={(e) => onVariantSearchInput((e.target as HTMLInputElement).value, item.seller_id || group.seller_id || sellerId)}
+                                                                oninput={(e) => onVariantSearchInput((e.target as HTMLInputElement).value, Number(item.seller_id || group.seller_id || sellerId) || null)}
                                                                 placeholder="Cari SKU / Nama / Size..."
                                                                 class="w-full rounded-xl border border-rose-400 dark:border-rose-600 bg-white dark:bg-slate-900 pl-8 pr-3 py-1.5 text-xs text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-rose-500 shadow-sm font-medium"
                                                             />
@@ -2242,7 +2296,7 @@
 
                                                     <button
                                                         type="button"
-                                                        onclick={() => openVariantSelector(index, item.seller_id || group.seller_id || sellerId)}
+                                                        onclick={() => openVariantSelector(index, Number(item.seller_id || group.seller_id || sellerId) || null)}
                                                         class="px-2 py-1 bg-slate-100 dark:bg-slate-800 hover:bg-rose-50 dark:hover:bg-rose-950/50 text-slate-600 hover:text-rose-600 dark:text-slate-400 dark:hover:text-rose-400 text-[11px] font-bold rounded-lg transition-all flex items-center gap-1 shrink-0 border border-slate-200 dark:border-slate-700"
                                                         title="Ubah Produk / Size"
                                                     >
@@ -2253,7 +2307,7 @@
                                             {:else}
                                                 <button
                                                     type="button"
-                                                    onclick={() => openVariantSelector(index, item.seller_id || group.seller_id || sellerId)}
+                                                    onclick={() => openVariantSelector(index, Number(item.seller_id || group.seller_id || sellerId) || null)}
                                                     class="w-full py-2 px-3 border border-dashed border-rose-300 dark:border-rose-700 hover:border-rose-500 rounded-xl text-rose-600 dark:text-rose-400 hover:bg-rose-50/50 dark:hover:bg-rose-950/30 flex items-center justify-center gap-2 text-xs font-semibold transition-all"
                                                 >
                                                     <Search class="w-3.5 h-3.5" />
@@ -2363,18 +2417,22 @@
                 >
                     <div>
                         <h3
-                            class="text-sm font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2"
+                            class="text-sm font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2 flex-wrap"
                         >
                             <FileText class="w-4 h-4 text-emerald-500" />
-                            Daftar Summary No. Resi & Order ({resiList.length} Transaksi)
+                            <span>Daftar Summary No. Resi & Order ({resiList.length} Transaksi)</span>
+                            {#if hasResiPayments}
+                                <span class="text-xs font-black px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
+                                    Total Pencairan: {formatRupiah(totalResiPayment)}
+                                </span>
+                            {/if}
                         </h3>
-                        <p class="text-xs text-slate-400">
-                            Daftar resi pesanan yang terasosiasi dengan
-                            pengeluaran stok ini.
+                        <p class="text-xs text-slate-400 mt-0.5">
+                            Daftar resi pesanan yang terasosiasi dengan pengeluaran stok ini. Anda dapat mengedit Order ID, No. Resi, maupun Nilai Pembayaran (termasuk nilai minus untuk pengurangan/koreksi).
                         </p>
                     </div>
 
-                    <div class="flex items-center gap-3">
+                    <div class="flex items-center gap-2.5 flex-wrap sm:flex-nowrap">
                         <div class="relative w-full sm:w-64">
                             <Search
                                 class="w-3.5 h-3.5 absolute left-3 top-2.5 text-slate-400"
@@ -2387,12 +2445,25 @@
                             />
                         </div>
 
-                        <button
-                            onclick={addResiRow}
-                            class="px-3 py-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 text-slate-700 dark:text-slate-200 text-xs font-bold rounded-xl flex items-center gap-1"
+                        <!-- Rows per page selector -->
+                        <select
+                            bind:value={resiPerPage}
+                            class="px-2.5 py-1.5 text-xs font-semibold bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-700 dark:text-slate-300"
+                            title="Jumlah baris per halaman"
                         >
-                            <Plus class="w-3.5 h-3.5" />
-                            <span>Tambah Resi</span>
+                            <option value={10}>10 / hal</option>
+                            <option value={20}>20 / hal</option>
+                            <option value={50}>50 / hal</option>
+                            <option value={100}>100 / hal</option>
+                        </select>
+
+                        <button
+                            type="button"
+                            onclick={addResiRow}
+                            class="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-sm transition-all shrink-0 cursor-pointer"
+                        >
+                            <Plus class="w-4 h-4" />
+                            <span>Tambah Resi Manual</span>
                         </button>
                     </div>
                 </div>
@@ -2403,13 +2474,13 @@
                             <tr
                                 class="border-b border-slate-200 dark:border-slate-800 text-slate-500 font-bold bg-slate-50 dark:bg-slate-950"
                             >
-                                <th class="p-2.5 w-12">No</th>
-                                <th class="p-2.5">Order ID / No Pesanan</th>
-                                <th class="p-2.5">No. Resi Marketplace</th>
-                                <th class="p-2.5 text-right"
-                                    >Nilai Pembayaran</th
+                                <th class="p-2.5 w-12 text-center">No</th>
+                                <th class="p-2.5 min-w-[200px]">Order ID / No Pesanan</th>
+                                <th class="p-2.5 min-w-[200px]">No. Resi Marketplace</th>
+                                <th class="p-2.5 text-right min-w-[180px]"
+                                    >Nilai Pembayaran (Rp)</th
                                 >
-                                <th class="p-2.5 text-center w-12">Aksi</th>
+                                <th class="p-2.5 text-center w-14">Aksi</th>
                             </tr>
                         </thead>
                         <tbody
@@ -2417,41 +2488,81 @@
                         >
                             {#each paginatedResis as r, idx}
                                 <tr
-                                    class="hover:bg-slate-50 dark:hover:bg-slate-800/40"
+                                    class="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors"
                                 >
-                                    <td class="p-2.5 text-slate-400"
+                                    <td class="p-2.5 text-slate-400 text-center font-medium"
                                         >{(resiPage - 1) * resiPerPage +
                                             idx +
                                             1}</td
                                     >
-                                    <td
-                                        class="p-2.5 font-mono font-bold text-slate-800 dark:text-slate-200"
-                                        >{r.order_id || "-"}</td
-                                    >
-                                    <td
-                                        class="p-2.5 font-mono text-slate-600 dark:text-slate-400"
-                                        >{r.no_resi || "-"}</td
-                                    >
-                                    <td
-                                        class="p-2.5 text-right font-bold text-emerald-600 dark:text-emerald-400"
-                                        >{formatRupiah(r.payment || 0)}</td
-                                    >
-                                    <td class="p-2.5 text-center">
+                                    <td class="p-2">
+                                        <input
+                                            type="text"
+                                            bind:value={r.order_id}
+                                            placeholder="No. Pesanan / Order ID"
+                                            class="w-full px-2.5 py-1.5 text-xs font-mono font-bold bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+                                        />
+                                    </td>
+                                    <td class="p-2">
+                                        <input
+                                            type="text"
+                                            bind:value={r.no_resi}
+                                            placeholder="No. Resi Pengiriman"
+                                            class="w-full px-2.5 py-1.5 text-xs font-mono bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-700 dark:text-slate-300 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+                                        />
+                                    </td>
+                                    <td class="p-2 text-right">
+                                        <div class="flex flex-col items-end gap-0.5">
+                                            <input
+                                                type="number"
+                                                step="any"
+                                                bind:value={r.payment}
+                                                placeholder="0"
+                                                class="w-full max-w-[160px] text-right px-2.5 py-1.5 text-xs font-bold rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 {Number(r.payment) < 0 ? 'text-rose-600 dark:text-rose-400 font-black' : 'text-emerald-600 dark:text-emerald-400 font-bold'}"
+                                            />
+                                            <span class="text-[10px] font-semibold {Number(r.payment) < 0 ? 'text-rose-500 dark:text-rose-400' : 'text-slate-400'}">
+                                                {formatRupiah(Number(r.payment) || 0)}
+                                            </span>
+                                        </div>
+                                    </td>
+                                    <td class="p-2 text-center">
                                         <button
-                                            onclick={() =>
-                                                removeResiRow(
-                                                    (resiPage - 1) *
-                                                        resiPerPage +
-                                                        idx,
-                                                )}
-                                            class="text-rose-500 hover:text-rose-700"
+                                            type="button"
+                                            onclick={() => removeResiItem(r)}
+                                            class="p-1.5 text-rose-500 hover:text-rose-700 hover:bg-rose-50 dark:hover:bg-rose-950/50 rounded-lg transition-colors cursor-pointer"
+                                            title="Hapus Resi Ini"
                                         >
-                                            <X class="w-4 h-4" />
+                                            <Trash2 class="w-4 h-4" />
                                         </button>
+                                    </td>
+                                </tr>
+                            {:else}
+                                <tr>
+                                    <td colspan="5" class="p-6 text-center text-slate-400 italic">
+                                        {#if resiSearch.trim()}
+                                            Tidak ada resi yang cocok dengan pencarian "{resiSearch}".
+                                        {:else}
+                                            Belum ada nomor resi yang terdaftar. Klik tombol "+ Tambah Resi Manual" di atas untuk menambahkan.
+                                        {/if}
                                     </td>
                                 </tr>
                             {/each}
                         </tbody>
+                        {#if resiList.length > 0}
+                            <tfoot>
+                                <tr class="border-t-2 border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-900/80 font-bold text-xs">
+                                    <td colspan="3" class="p-3 text-right text-slate-600 dark:text-slate-300">
+                                        Total Nilai Pencairan ({resiList.length} Transaksi):
+                                    </td>
+                                    <td class="p-3 text-right">
+                                        <span class="text-sm font-black {totalResiPayment < 0 ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'}">
+                                            {formatRupiah(totalResiPayment)}
+                                        </span>
+                                    </td>
+                                    <td></td>
+                                </tr>
+                            </tfoot>
+                        {/if}
                     </table>
                 </div>
 
@@ -2459,19 +2570,19 @@
                 {#if totalResiPages > 1}
                     <div class="flex items-center justify-between text-xs pt-2">
                         <span class="text-slate-400"
-                            >Menampilkan Halaman {resiPage} dari {totalResiPages}</span
+                            >Menampilkan Halaman {resiPage} dari {totalResiPages} ({filteredResis.length} Transaksi)</span
                         >
                         <div class="flex items-center gap-1">
                             <button
                                 disabled={resiPage === 1}
                                 onclick={() => resiPage--}
-                                class="px-3 py-1 bg-slate-100 dark:bg-slate-800 rounded-lg disabled:opacity-50 font-bold"
+                                class="px-3 py-1 bg-slate-100 dark:bg-slate-800 rounded-lg disabled:opacity-50 font-bold cursor-pointer"
                                 >Prev</button
                             >
                             <button
                                 disabled={resiPage === totalResiPages}
                                 onclick={() => resiPage++}
-                                class="px-3 py-1 bg-slate-100 dark:bg-slate-800 rounded-lg disabled:opacity-50 font-bold"
+                                class="px-3 py-1 bg-slate-100 dark:bg-slate-800 rounded-lg disabled:opacity-50 font-bold cursor-pointer"
                                 >Next</button
                             >
                         </div>

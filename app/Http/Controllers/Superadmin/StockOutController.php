@@ -241,13 +241,14 @@ class StockOutController extends Controller
             'resi_summary' => ['required', 'string'],
             'date' => ['required', 'date'],
             'note' => ['nullable', 'string'],
-            'bruto' => ['nullable', 'numeric', 'min:0'],
+            'bruto' => ['nullable', 'numeric'],
+            'total_selling_price' => ['nullable', 'numeric'],
             'items' => ['required', 'array', 'min:1'],
             'items.*.product_variant_id' => ['required', 'exists:product_variants,id'],
             'items.*.konveksi_id' => ['nullable', 'exists:konveksis,id'],
             'items.*.qty' => ['required', 'integer', 'min:1'],
             'items.*.price' => ['required', 'numeric', 'min:0'],
-            'items.*.selling_price' => ['required', 'numeric', 'min:0'],
+            'items.*.selling_price' => ['required', 'numeric'],
         ]);
 
         DB::transaction(function () use ($validated, $request) {
@@ -256,6 +257,25 @@ class StockOutController extends Controller
             foreach ($validated['items'] as $item) {
                 $totalHpp += $item['price'] * $item['qty'];
                 $totalSelling += $item['selling_price'] * $item['qty'];
+            }
+
+            // Check if resi_summary contains payments or total_selling_price provided
+            $parsedResis = json_decode($validated['resi_summary'], true);
+            $hasResiPayments = false;
+            $resiPaymentSum = 0;
+            if (is_array($parsedResis)) {
+                foreach ($parsedResis as $r) {
+                    if (isset($r['payment']) && is_numeric($r['payment'])) {
+                        $hasResiPayments = true;
+                        $resiPaymentSum += (float)$r['payment'];
+                    }
+                }
+            }
+
+            if ($hasResiPayments) {
+                $totalSelling = $resiPaymentSum;
+            } elseif ($request->filled('total_selling_price')) {
+                $totalSelling = (float)$request->input('total_selling_price');
             }
 
             $brutoVal = floatval($validated['bruto'] ?? $totalSelling);
@@ -274,7 +294,16 @@ class StockOutController extends Controller
                 'bruto' => $brutoVal,
             ]);
 
+            $rawItemsSellingSum = 0;
+            foreach ($validated['items'] as $it) {
+                $rawItemsSellingSum += (float)$it['selling_price'] * (int)$it['qty'];
+            }
+            $scaleRatio = ($rawItemsSellingSum > 0 && abs($rawItemsSellingSum - $totalSelling) > 0.01)
+                ? ($totalSelling / $rawItemsSellingSum)
+                : 1.0;
+
             foreach ($validated['items'] as $itemData) {
+                $adjustedSellingPrice = round((float)$itemData['selling_price'] * $scaleRatio, 2);
                 StockOutItem::create([
                     'stock_out_id' => $stockOut->id,
                     'product_variant_id' => $itemData['product_variant_id'],
@@ -282,7 +311,7 @@ class StockOutController extends Controller
                     'qty' => $itemData['qty'],
                     'price' => $itemData['price'],
                     'subtotal' => $itemData['price'] * $itemData['qty'],
-                    'selling_price' => $itemData['selling_price'],
+                    'selling_price' => $adjustedSellingPrice,
                 ]);
 
                 $variant = ProductVariant::with('product')->find($itemData['product_variant_id']);
@@ -316,13 +345,14 @@ class StockOutController extends Controller
             'resi_summary' => ['required', 'string'],
             'date' => ['required', 'date'],
             'note' => ['nullable', 'string'],
-            'bruto' => ['nullable', 'numeric', 'min:0'],
+            'bruto' => ['nullable', 'numeric'],
+            'total_selling_price' => ['nullable', 'numeric'],
             'items' => ['required', 'array', 'min:1'],
             'items.*.product_variant_id' => ['required', 'exists:product_variants,id'],
             'items.*.konveksi_id' => ['nullable', 'exists:konveksis,id'],
             'items.*.qty' => ['required', 'integer', 'min:1'],
             'items.*.price' => ['required', 'numeric', 'min:0'],
-            'items.*.selling_price' => ['required', 'numeric', 'min:0'],
+            'items.*.selling_price' => ['required', 'numeric'],
         ]);
 
         DB::transaction(function () use ($validated, $request, $stockOut) {
@@ -359,6 +389,25 @@ class StockOutController extends Controller
                 $totalSelling += $item['selling_price'] * $item['qty'];
             }
 
+            // Check if resi_summary contains payments or total_selling_price provided
+            $parsedResis = json_decode($validated['resi_summary'], true);
+            $hasResiPayments = false;
+            $resiPaymentSum = 0;
+            if (is_array($parsedResis)) {
+                foreach ($parsedResis as $r) {
+                    if (isset($r['payment']) && is_numeric($r['payment'])) {
+                        $hasResiPayments = true;
+                        $resiPaymentSum += (float)$r['payment'];
+                    }
+                }
+            }
+
+            if ($hasResiPayments) {
+                $totalSelling = $resiPaymentSum;
+            } elseif ($request->filled('total_selling_price')) {
+                $totalSelling = (float)$request->input('total_selling_price');
+            }
+
             $brutoVal = floatval($validated['bruto'] ?? $totalSelling);
             if ($brutoVal <= 0) $brutoVal = $totalSelling;
 
@@ -375,7 +424,16 @@ class StockOutController extends Controller
                 'bruto' => $brutoVal,
             ]);
 
+            $rawItemsSellingSum = 0;
+            foreach ($validated['items'] as $it) {
+                $rawItemsSellingSum += (float)$it['selling_price'] * (int)$it['qty'];
+            }
+            $scaleRatio = ($rawItemsSellingSum > 0 && abs($rawItemsSellingSum - $totalSelling) > 0.01)
+                ? ($totalSelling / $rawItemsSellingSum)
+                : 1.0;
+
             foreach ($validated['items'] as $itemData) {
+                $adjustedSellingPrice = round((float)$itemData['selling_price'] * $scaleRatio, 2);
                 StockOutItem::create([
                     'stock_out_id' => $stockOut->id,
                     'product_variant_id' => $itemData['product_variant_id'],
@@ -383,7 +441,7 @@ class StockOutController extends Controller
                     'qty' => $itemData['qty'],
                     'price' => $itemData['price'],
                     'subtotal' => $itemData['price'] * $itemData['qty'],
-                    'selling_price' => $itemData['selling_price'],
+                    'selling_price' => $adjustedSellingPrice,
                 ]);
 
                 $variant = ProductVariant::with('product')->find($itemData['product_variant_id']);
