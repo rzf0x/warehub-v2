@@ -1712,7 +1712,11 @@
                         <div class="space-y-1">
                             <div class="flex items-center gap-2 flex-wrap">
                                 <h4 class="text-sm font-extrabold text-amber-950 dark:text-amber-100 flex items-center gap-2">
-                                    <span>Peringatan: Ditemukan {missingSkusList.length} SKU Belum Terdaftar & Selisih Pencairan Netto</span>
+                                    {#if missingSkusList.length > 0}
+                                        <span>Peringatan: Ditemukan {missingSkusList.length} SKU Belum Terdaftar & Selisih Pencairan Netto</span>
+                                    {:else}
+                                        <span>Peringatan: Terdapat Selisih Nilai Pencairan Netto</span>
+                                    {/if}
                                 </h4>
                                 <span class="px-2.5 py-0.5 rounded-full text-[10px] font-black bg-rose-100 dark:bg-rose-950/80 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800 shadow-2xs">
                                     Selisih: -{formatRupiah(Math.abs(filePencairanDiff || totalMissingAmount))}
@@ -1725,7 +1729,11 @@
                             </div>
                             <p class="text-xs text-amber-900/80 dark:text-amber-200/80 leading-relaxed">
                                 Total pencairan bersih di file JSON adalah <strong>{formatRupiah(fileSuggestedPencairan || 0)}</strong>, namun item yang berhasil dicocokkan ke database gudang saat ini bernilai <strong>{formatRupiah(liveTotalSelling)}</strong>.
-                                Terdapat <strong>{missingSkusList.length} SKU ({totalMissingPcs} pcs)</strong> senilai <strong>{formatRupiah(totalMissingAmount || Math.abs(filePencairanDiff))}</strong> yang belum terdaftar di gudang sehingga belum bisa dipotong stoknya.
+                                {#if missingSkusList.length > 0}
+                                    Terdapat <strong>{missingSkusList.length} SKU ({totalMissingPcs} pcs)</strong> senilai <strong>{formatRupiah(totalMissingAmount || Math.abs(filePencairanDiff))}</strong> yang belum terdaftar di gudang sehingga belum bisa dipotong stoknya.
+                                {:else}
+                                    Semua SKU ({liveTotalQty} pcs) telah cocok dengan database gudang, namun terdapat selisih nominal pencairan sebesar <strong>{formatRupiah(Math.abs(filePencairanDiff))}</strong>.
+                                {/if}
                             </p>
                         </div>
                     </div>
@@ -1766,7 +1774,11 @@
                             -{formatRupiah(Math.abs(filePencairanDiff || totalMissingAmount))}
                         </div>
                         <p class="text-[10px] text-rose-600/80 dark:text-rose-400/80 mt-0.5">
-                            {totalMissingPcs} pcs tertahan dari {missingSkusList.length} SKU
+                            {#if missingSkusList.length > 0}
+                                {totalMissingPcs} pcs tertahan dari {missingSkusList.length} SKU
+                            {:else}
+                                Selisih nilai pencairan (Semua SKU cocok)
+                            {/if}
                         </p>
                     </div>
                 </div>

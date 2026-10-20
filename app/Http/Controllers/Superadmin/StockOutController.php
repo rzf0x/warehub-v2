@@ -540,11 +540,17 @@ class StockOutController extends Controller
 
             if ($orderId || $resi) {
                 $rKey = $orderId ?: $resi;
-                $resisSet[$rKey] = [
-                    'order_id' => $orderId,
-                    'no_resi' => $resi,
-                    'payment' => $paymentAmt,
-                ];
+                if (!isset($resisSet[$rKey])) {
+                    $resisSet[$rKey] = [
+                        'order_id' => $orderId,
+                        'no_resi' => $resi,
+                        'payment' => 0.0,
+                    ];
+                }
+                $resisSet[$rKey]['payment'] = round($resisSet[$rKey]['payment'] + $paymentAmt, 2);
+                if ($resi && empty($resisSet[$rKey]['no_resi'])) {
+                    $resisSet[$rKey]['no_resi'] = $resi;
+                }
             }
 
             if (!$rawSku) continue;
