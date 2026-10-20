@@ -57,6 +57,7 @@ class CleaningDataShopeeController extends Controller
         $masterRows = $this->unwrapDataArray($masterRaw, ['Income', 'Penghasilan', 'orders', 'data', 'items', 'rows']);
         
         $masterMapping = [];
+        $masterInfoMap = [];
         $totalMasterGrossAmount = 0;
 
         foreach ($masterRows as $row) {
@@ -77,6 +78,14 @@ class CleaningDataShopeeController extends Controller
             }
             $masterMapping[$orderId] += $amt;
             $totalMasterGrossAmount += $amt;
+
+            if (!isset($masterInfoMap[$orderId])) {
+                $masterInfoMap[$orderId] = [
+                    'order_date' => $this->extractMasterOrderDate($row),
+                    'release_date' => $this->extractMasterReleaseDate($row),
+                    'buyer_username' => $this->extractMasterBuyer($row),
+                ];
+            }
         }
 
         $totalOrderIdsMaster = count($masterMapping);
@@ -249,9 +258,13 @@ class CleaningDataShopeeController extends Controller
         $missingOrderIds = [];
         foreach ($scaledMasterMapping as $orderId => $amt) {
             if (!isset($matchedOrdersMap[$orderId])) {
+                $info = $masterInfoMap[$orderId] ?? [];
                 $missingOrderIds[] = [
                     'order_id' => $orderId,
                     'amount' => $amt,
+                    'order_date' => $info['order_date'] ?? '-',
+                    'release_date' => $info['release_date'] ?? '-',
+                    'buyer_username' => $info['buyer_username'] ?? '-',
                 ];
             }
         }
@@ -385,6 +398,80 @@ class CleaningDataShopeeController extends Controller
         }
 
         return 0.0;
+    }
+
+    private function extractMasterOrderDate(array $row): string
+    {
+        $priorityKeys = [
+            'Waktu Pesanan Dibuat', 'waktu_pesanan_dibuat',
+            'Tanggal Pemesanan', 'tanggal_pemesanan',
+            'Waktu Pembuatan Pesanan', 'Tanggal Pesanan',
+            'Order Creation Date', 'Column5',
+        ];
+        foreach ($priorityKeys as $k) {
+            if (isset($row[$k])) {
+                $val = trim((string)$row[$k]);
+                if ($val !== '' && !in_array(strtoupper($val), ['WAKTU PESANAN DIBUAT', 'TANGGAL PEMESANAN', 'COLUMN5'])) {
+                    return $val;
+                }
+            }
+        }
+        foreach ($row as $k => $v) {
+            if (is_string($v) && preg_match('/pesanan.*dibuat|pemesanan|creation/i', (string)$k)) {
+                $trimmed = trim($v);
+                if ($trimmed !== '') return $trimmed;
+            }
+        }
+        return '-';
+    }
+
+    private function extractMasterReleaseDate(array $row): string
+    {
+        $priorityKeys = [
+            'Tanggal Dana Dilepaskan', 'tanggal_dana_dilepaskan',
+            'Waktu Dana Dilepaskan', 'Tanggal Pesanan Selesai',
+            'tanggal_pesanan_selesai', 'Waktu Pesanan Selesai',
+            'Tanggal Selesai', 'Payout Date', 'Release Date',
+            'Column4',
+        ];
+        foreach ($priorityKeys as $k) {
+            if (isset($row[$k])) {
+                $val = trim((string)$row[$k]);
+                if ($val !== '' && !in_array(strtoupper($val), ['TANGGAL DANA DILEPASKAN', 'TANGGAL PESANAN SELESAI', 'COLUMN4'])) {
+                    return $val;
+                }
+            }
+        }
+        foreach ($row as $k => $v) {
+            if (is_string($v) && preg_match('/dana.*dilepas|selesai|release|payout/i', (string)$k)) {
+                $trimmed = trim($v);
+                if ($trimmed !== '') return $trimmed;
+            }
+        }
+        return '-';
+    }
+
+    private function extractMasterBuyer(array $row): string
+    {
+        $priorityKeys = [
+            'Username Pembeli (Username)', 'Username Pembeli', 'username_pembeli',
+            'Nama Pembeli', 'nama_pembeli', 'Buyer Username', 'Buyer', 'Column6',
+        ];
+        foreach ($priorityKeys as $k) {
+            if (isset($row[$k])) {
+                $val = trim((string)$row[$k]);
+                if ($val !== '' && !in_array(strtoupper($val), ['USERNAME PEMBELI', 'NAMA PEMBELI', 'COLUMN6'])) {
+                    return $val;
+                }
+            }
+        }
+        foreach ($row as $k => $v) {
+            if (is_string($v) && preg_match('/pembeli|buyer/i', (string)$k)) {
+                $trimmed = trim($v);
+                if ($trimmed !== '') return $trimmed;
+            }
+        }
+        return '-';
     }
 
     private function extractSize(string $variationStr, string $skuStr): string

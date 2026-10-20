@@ -20,6 +20,12 @@
         Box,
         ListFilter,
         XCircle,
+        Copy,
+        ExternalLink,
+        Calendar,
+        Clock,
+        User,
+        AlertOctagon,
     } from "@lucide/svelte";
 
     // State Variables
@@ -74,9 +80,131 @@
     >([]);
     let skuBreakdownMore = $state<number>(0);
 
-    let missingOrderIds = $state<Array<{ order_id: string; amount: number }>>(
-        [],
+    let missingOrderIds = $state<
+        Array<{
+            order_id: string;
+            amount: number;
+            order_date?: string;
+            release_date?: string;
+            buyer_username?: string;
+        }>
+    >([]);
+
+    let copiedOrderId = $state<string | null>(null);
+    let isCopiedAllMissing = $state<boolean>(false);
+
+    let totalMissingAmount = $derived(
+        missingOrderIds.reduce((acc, m) => acc + (m.amount || 0), 0),
     );
+
+    async function copyOrderId(orderId: string) {
+        await navigator.clipboard.writeText(orderId);
+        copiedOrderId = orderId;
+        setTimeout(() => {
+            if (copiedOrderId === orderId) copiedOrderId = null;
+        }, 2000);
+    }
+
+    async function copyAllMissingOrders() {
+        if (missingOrderIds.length === 0) return;
+        const text = missingOrderIds.map((m) => m.order_id).join(", ");
+        await navigator.clipboard.writeText(text);
+        isCopiedAllMissing = true;
+        setTimeout(() => {
+            isCopiedAllMissing = false;
+        }, 2000);
+    }
+
+    function openShopeeOrder(orderId: string) {
+        const url = `https://seller.shopee.co.id/portal/sale/order?type=order_sn&keyword=${encodeURIComponent(orderId)}`;
+        window.open(url, "_blank");
+    }
+
+    function extractMasterOrderDate(row: Record<string, any>): string {
+        const priorityKeys = [
+            "Waktu Pesanan Dibuat",
+            "waktu_pesanan_dibuat",
+            "Tanggal Pemesanan",
+            "tanggal_pemesanan",
+            "Waktu Pembuatan Pesanan",
+            "Tanggal Pesanan",
+            "Order Creation Date",
+            "Column5",
+        ];
+        for (const k of priorityKeys) {
+            if (row[k] !== undefined && row[k] !== null && String(row[k]).trim() !== "") {
+                const val = String(row[k]).trim();
+                if (!["WAKTU PESANAN DIBUAT", "TANGGAL PEMESANAN", "COLUMN5"].includes(val.toUpperCase())) {
+                    return val;
+                }
+            }
+        }
+        for (const [k, v] of Object.entries(row)) {
+            if (v && typeof v === "string" && /pesanan.*dibuat|pemesanan|creation/i.test(k)) {
+                const s = v.trim();
+                if (s) return s;
+            }
+        }
+        return "-";
+    }
+
+    function extractMasterReleaseDate(row: Record<string, any>): string {
+        const priorityKeys = [
+            "Tanggal Dana Dilepaskan",
+            "tanggal_dana_dilepaskan",
+            "Waktu Dana Dilepaskan",
+            "Tanggal Pesanan Selesai",
+            "tanggal_pesanan_selesai",
+            "Waktu Pesanan Selesai",
+            "Tanggal Selesai",
+            "Payout Date",
+            "Release Date",
+            "Column4",
+        ];
+        for (const k of priorityKeys) {
+            if (row[k] !== undefined && row[k] !== null && String(row[k]).trim() !== "") {
+                const val = String(row[k]).trim();
+                if (!["TANGGAL DANA DILEPASKAN", "TANGGAL PESANAN SELESAI", "COLUMN4"].includes(val.toUpperCase())) {
+                    return val;
+                }
+            }
+        }
+        for (const [k, v] of Object.entries(row)) {
+            if (v && typeof v === "string" && /dana.*dilepas|selesai|release|payout/i.test(k)) {
+                const s = v.trim();
+                if (s) return s;
+            }
+        }
+        return "-";
+    }
+
+    function extractMasterBuyer(row: Record<string, any>): string {
+        const priorityKeys = [
+            "Username Pembeli (Username)",
+            "Username Pembeli",
+            "username_pembeli",
+            "Nama Pembeli",
+            "nama_pembeli",
+            "Buyer Username",
+            "Buyer",
+            "Column6",
+        ];
+        for (const k of priorityKeys) {
+            if (row[k] !== undefined && row[k] !== null && String(row[k]).trim() !== "") {
+                const val = String(row[k]).trim();
+                if (!["USERNAME PEMBELI", "NAMA PEMBELI", "COLUMN6"].includes(val.toUpperCase())) {
+                    return val;
+                }
+            }
+        }
+        for (const [k, v] of Object.entries(row)) {
+            if (v && typeof v === "string" && /pembeli|buyer/i.test(k)) {
+                const s = v.trim();
+                if (s) return s;
+            }
+        }
+        return "-";
+    }
 
     // ==========================================
     // HELPER FUNCTIONS (100% SPEC MATCH)
@@ -458,6 +586,11 @@
 
             // 2. Map Master Data Orders & Accumulated Nominals
             const masterMapping: Record<string, number> = {};
+            const masterInfoMap: Record<string, {
+                order_date: string;
+                release_date: string;
+                buyer_username: string;
+            }> = {};
             let totalMasterGrossAmt = 0;
 
             masterJsonData.forEach((row) => {
@@ -483,6 +616,14 @@
                 }
                 masterMapping[orderId] += amt;
                 totalMasterGrossAmt += amt;
+
+                if (!masterInfoMap[orderId]) {
+                    masterInfoMap[orderId] = {
+                        order_date: extractMasterOrderDate(row),
+                        release_date: extractMasterReleaseDate(row),
+                        buyer_username: extractMasterBuyer(row),
+                    };
+                }
             });
 
             const totalOrderIdsMasterCount = Object.keys(masterMapping).length;
@@ -696,12 +837,26 @@
             processProgress = 85;
 
             // 4. Missing Order IDs
-            const missingList: Array<{ order_id: string; amount: number }> = [];
+            const missingList: Array<{
+                order_id: string;
+                amount: number;
+                order_date: string;
+                release_date: string;
+                buyer_username: string;
+            }> = [];
             Object.keys(scaledMasterMapping).forEach((orderId) => {
                 if (matchedOrdersMap[orderId] === undefined) {
+                    const info = masterInfoMap[orderId] || {
+                        order_date: "-",
+                        release_date: "-",
+                        buyer_username: "-",
+                    };
                     missingList.push({
                         order_id: orderId,
                         amount: scaledMasterMapping[orderId],
+                        order_date: info.order_date || "-",
+                        release_date: info.release_date || "-",
+                        buyer_username: info.buyer_username || "-",
                     });
                 }
             });
@@ -848,6 +1003,12 @@
             (item) =>
                 !searchFilter.trim() ||
                 item.order_id
+                    .toLowerCase()
+                    .includes(searchFilter.toLowerCase()) ||
+                (item.buyer_username || "")
+                    .toLowerCase()
+                    .includes(searchFilter.toLowerCase()) ||
+                (item.order_date || "")
                     .toLowerCase()
                     .includes(searchFilter.toLowerCase()),
         ),
@@ -1152,6 +1313,121 @@
                             <AlertTriangle class="w-4 h-4" /> Selisih: {formatRupiah(paymentDiff)}
                         </span>
                     {/if}
+        {#if missingOrderIds.length > 0}
+            <!-- DEDICATED MISSING ORDER ID CARD -->
+            <div
+                class="rounded-2xl border-2 border-rose-300 dark:border-rose-800/80 bg-gradient-to-br from-rose-50/95 via-orange-50/40 to-amber-50/60 dark:from-rose-950/40 dark:via-slate-900 dark:to-orange-950/30 p-5 sm:p-6 shadow-md space-y-4 animate-in fade-in slide-in-from-top-2 duration-300"
+            >
+                <div class="flex flex-col md:flex-row md:items-start justify-between gap-4">
+                    <div class="flex items-start gap-4">
+                        <div class="w-12 h-12 rounded-2xl bg-rose-600 text-white flex items-center justify-center shrink-0 shadow-lg shadow-rose-600/30 mt-0.5">
+                            <AlertOctagon class="w-6 h-6 animate-pulse" />
+                        </div>
+                        <div class="space-y-1">
+                            <div class="flex items-center gap-2 flex-wrap">
+                                <h3 class="text-base font-extrabold text-rose-950 dark:text-rose-100 flex items-center gap-2">
+                                    <span>Perhatian: Ditemukan {missingOrderIds.length} Order ID Unmatched (Tidak Ada di File Pesanan)</span>
+                                </h3>
+                                <span class="px-2.5 py-0.5 rounded-full text-xs font-black bg-rose-200 dark:bg-rose-900/80 text-rose-800 dark:text-rose-200 border border-rose-300 dark:border-rose-700">
+                                    Total Dana Tertahan: {formatRupiah(totalMissingAmount)}
+                                </span>
+                            </div>
+                            <p class="text-xs text-rose-900/85 dark:text-rose-200/80 leading-relaxed max-w-4xl">
+                                Pesanan di bawah ini tercatat dananya cair di <strong>Laporan Penghasilan Shopee (Master)</strong>, namun <strong>TIDAK ADA</strong> di file <strong>Laporan Pesanan Mentah</strong> yang diunggah. Akibatnya, barang dari pesanan ini belum bisa dipetakan ke SKU untuk dipotong stoknya. Silakan cek No. Pesanan ini di Shopee Seller Centre (kemungkinan tanggal checkout berada di luar rentang tanggal ekspor pesanan atau status retur/kompensasi).
+                            </p>
+                        </div>
+                    </div>
+
+                    <div class="flex items-center gap-2 shrink-0 self-start md:self-center flex-wrap">
+                        <button
+                            type="button"
+                            onclick={copyAllMissingOrders}
+                            class="px-3.5 py-2 rounded-xl bg-white dark:bg-slate-900 border border-rose-300 dark:border-rose-800 hover:bg-rose-50 dark:hover:bg-rose-950/50 text-rose-700 dark:text-rose-300 text-xs font-bold shadow-xs flex items-center gap-1.5 transition-all cursor-pointer"
+                        >
+                            {#if isCopiedAllMissing}
+                                <Check class="w-4 h-4 text-emerald-600" />
+                                <span>Semua ID Tersalin!</span>
+                            {:else}
+                                <Copy class="w-4 h-4" />
+                                <span>Salin Semua ID ({missingOrderIds.length})</span>
+                            {/if}
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Table of Missing Orders with Action Buttons -->
+                <div class="overflow-hidden rounded-xl border border-rose-200 dark:border-rose-800/60 bg-white/90 dark:bg-slate-900/90 backdrop-blur-sm shadow-xs">
+                    <div class="overflow-x-auto max-h-[380px]">
+                        <table class="w-full text-left text-xs">
+                            <thead class="bg-rose-100/70 dark:bg-rose-950/70 text-rose-900 dark:text-rose-200 font-bold uppercase sticky top-0 border-b border-rose-200 dark:border-rose-800/60">
+                                <tr>
+                                    <th class="p-3">No. Pesanan (Order ID)</th>
+                                    <th class="p-3">Waktu Pesanan Dibuat</th>
+                                    <th class="p-3">Waktu Dana Dilepaskan</th>
+                                    <th class="p-3">Username Pembeli</th>
+                                    <th class="p-3 text-right">Nilai Pencairan</th>
+                                    <th class="p-3 text-center">Aksi Shopee</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-rose-100 dark:divide-rose-900/30 font-mono">
+                                {#each missingOrderIds as row}
+                                    <tr class="hover:bg-rose-50/60 dark:hover:bg-rose-950/30 transition-colors">
+                                        <td class="p-3">
+                                            <div class="flex items-center gap-2">
+                                                <span class="font-bold text-rose-600 dark:text-rose-400 text-xs select-all">
+                                                    {row.order_id}
+                                                </span>
+                                                <button
+                                                    type="button"
+                                                    onclick={() => copyOrderId(row.order_id)}
+                                                    class="p-1 rounded-md hover:bg-rose-200/60 dark:hover:bg-rose-800/40 text-slate-400 hover:text-rose-700 dark:hover:text-rose-300 transition-colors cursor-pointer"
+                                                    title="Salin No. Pesanan"
+                                                >
+                                                    {#if copiedOrderId === row.order_id}
+                                                        <Check class="w-3.5 h-3.5 text-emerald-600" />
+                                                    {:else}
+                                                        <Copy class="w-3.5 h-3.5" />
+                                                    {/if}
+                                                </button>
+                                            </div>
+                                        </td>
+                                        <td class="p-3 font-sans text-slate-700 dark:text-slate-300">
+                                            <span class="flex items-center gap-1.5">
+                                                <Calendar class="w-3.5 h-3.5 text-slate-400" />
+                                                {row.order_date || "-"}
+                                            </span>
+                                        </td>
+                                        <td class="p-3 font-sans text-slate-600 dark:text-slate-400">
+                                            <span class="flex items-center gap-1.5">
+                                                <Clock class="w-3.5 h-3.5 text-slate-400" />
+                                                {row.release_date || "-"}
+                                            </span>
+                                        </td>
+                                        <td class="p-3 font-sans text-slate-600 dark:text-slate-300">
+                                            <span class="flex items-center gap-1.5">
+                                                <User class="w-3.5 h-3.5 text-slate-400" />
+                                                {row.buyer_username || "-"}
+                                            </span>
+                                        </td>
+                                        <td class="p-3 text-right font-black text-rose-700 dark:text-rose-300">
+                                            {formatRupiah(row.amount)}
+                                        </td>
+                                        <td class="p-3 text-center">
+                                            <button
+                                                type="button"
+                                                onclick={() => openShopeeOrder(row.order_id)}
+                                                class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-orange-600 hover:bg-orange-700 text-white rounded-lg font-sans font-bold text-[11px] shadow-xs transition-all cursor-pointer"
+                                                title="Buka pencarian pesanan ini di Shopee Seller Centre"
+                                            >
+                                                <span>Cek Shopee</span>
+                                                <ExternalLink class="w-3 h-3" />
+                                            </button>
+                                        </td>
+                                    </tr>
+                                {/each}
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
         {/if}
@@ -1490,8 +1766,11 @@
                         >
                             <tr>
                                 <th class="p-3">Order ID (Master)</th>
+                                <th class="p-3">Waktu Pesanan Dibuat</th>
+                                <th class="p-3">Waktu Dana Dilepaskan</th>
+                                <th class="p-3">Username Pembeli</th>
                                 <th class="p-3 text-right">Nilai Pencairan</th>
-                                <th class="p-3 text-center">Status</th>
+                                <th class="p-3 text-center">Aksi Shopee</th>
                             </tr>
                         </thead>
                         <tbody
@@ -1500,7 +1779,7 @@
                             {#if filteredMissingOrderIds.length === 0}
                                 <tr>
                                     <td
-                                        colspan="3"
+                                        colspan="6"
                                         class="p-8 text-center text-emerald-500 font-semibold font-sans"
                                     >
                                         {#if missingOrderIds.length === 0}
@@ -1513,20 +1792,60 @@
                             {:else}
                                 {#each filteredMissingOrderIds as row}
                                     <tr
-                                        class="hover:bg-rose-50/30 dark:hover:bg-rose-950/20"
+                                        class="hover:bg-rose-50/40 dark:hover:bg-rose-950/20 transition-colors"
                                     >
+                                        <td class="p-3">
+                                            <div class="flex items-center gap-2">
+                                                <span class="font-bold text-rose-600 dark:text-rose-400 select-all">
+                                                    {row.order_id}
+                                                </span>
+                                                <button
+                                                    type="button"
+                                                    onclick={() => copyOrderId(row.order_id)}
+                                                    class="p-1 rounded-md hover:bg-rose-100 dark:hover:bg-rose-900/40 text-slate-400 hover:text-rose-700 dark:hover:text-rose-300 transition-colors cursor-pointer"
+                                                    title="Salin No. Pesanan"
+                                                >
+                                                    {#if copiedOrderId === row.order_id}
+                                                        <Check class="w-3.5 h-3.5 text-emerald-600" />
+                                                    {:else}
+                                                        <Copy class="w-3.5 h-3.5" />
+                                                    {/if}
+                                                </button>
+                                            </div>
+                                        </td>
+                                        <td class="p-3 font-sans text-slate-700 dark:text-slate-300">
+                                            <span class="flex items-center gap-1.5">
+                                                <Calendar class="w-3.5 h-3.5 text-slate-400" />
+                                                {row.order_date || "-"}
+                                            </span>
+                                        </td>
+                                        <td class="p-3 font-sans text-slate-600 dark:text-slate-400">
+                                            <span class="flex items-center gap-1.5">
+                                                <Clock class="w-3.5 h-3.5 text-slate-400" />
+                                                {row.release_date || "-"}
+                                            </span>
+                                        </td>
+                                        <td class="p-3 font-sans text-slate-600 dark:text-slate-300">
+                                            <span class="flex items-center gap-1.5">
+                                                <User class="w-3.5 h-3.5 text-slate-400" />
+                                                {row.buyer_username || "-"}
+                                            </span>
+                                        </td>
                                         <td
-                                            class="p-3 font-bold text-rose-600 dark:text-rose-400"
-                                            >{row.order_id}</td
+                                            class="p-3 text-right font-black text-rose-700 dark:text-rose-300"
                                         >
-                                        <td class="p-3 text-right font-bold text-slate-700 dark:text-slate-200"
-                                            >{formatRupiah(row.amount)}</td
-                                        >
+                                            {formatRupiah(row.amount)}
+                                        </td>
                                         <td class="p-3 text-center">
-                                            <span
-                                                class="px-2 py-0.5 bg-rose-100 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 font-sans text-[10px] font-bold rounded"
-                                                >Unmatched</span
+                                            <button
+                                                type="button"
+                                                onclick={() => openShopeeOrder(row.order_id)}
+                                                class="inline-flex items-center gap-1.5 px-3 py-1 bg-orange-600 hover:bg-orange-700 text-white rounded-lg font-sans font-bold text-[11px] shadow-xs transition-all cursor-pointer"
+                                                title="Buka pencarian pesanan ini di Shopee Seller Centre"
                                             >
+                                                <span>Cek Shopee</span>
+                                                <ExternalLink class="w-3 h-3" />
+                                            </button>
                                         </td>
                                     </tr>
                                 {/each}
