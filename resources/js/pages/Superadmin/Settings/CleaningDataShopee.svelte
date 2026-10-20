@@ -1313,6 +1313,10 @@
                             <AlertTriangle class="w-4 h-4" /> Selisih: {formatRupiah(paymentDiff)}
                         </span>
                     {/if}
+                </div>
+            </div>
+        {/if}
+
         {#if missingOrderIds.length > 0}
             <!-- DEDICATED MISSING ORDER ID CARD -->
             <div
