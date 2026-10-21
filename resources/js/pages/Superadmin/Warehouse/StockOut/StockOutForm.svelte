@@ -2236,6 +2236,66 @@
                                                         </button>
                                                     </div>
 
+                                                    <!-- Info Produk Saat Ini yang Sedang Diubah -->
+                                                    {#if item.product_name || item.sku}
+                                                        <div class="p-2.5 rounded-xl bg-amber-50/90 dark:bg-amber-950/40 border border-amber-200/90 dark:border-amber-800/70 text-xs shadow-xs space-y-1">
+                                                            <div class="flex items-center justify-between gap-1 text-[10px] font-bold text-amber-800 dark:text-amber-300">
+                                                                <span class="flex items-center gap-1">
+                                                                    <Tag class="w-3 h-3 text-amber-600 dark:text-amber-400" />
+                                                                    <span>Produk yang Mau Diubah:</span>
+                                                                </span>
+                                                                <span class="text-[9px] font-medium text-amber-700/80 dark:text-amber-400/80">
+                                                                    (Klik nama/SKU untuk cari)
+                                                                </span>
+                                                            </div>
+                                                            
+                                                            <div class="flex items-center justify-between gap-2">
+                                                                <button
+                                                                    type="button"
+                                                                    onclick={() => {
+                                                                        if (item.product_name) {
+                                                                            variantSearchQuery = item.product_name;
+                                                                            onVariantSearchInput(variantSearchQuery, Number(item.seller_id || group.seller_id || sellerId) || null);
+                                                                        }
+                                                                    }}
+                                                                    class="font-bold text-slate-800 dark:text-slate-100 truncate text-[11px] text-left hover:text-rose-600 dark:hover:text-rose-400 hover:underline transition-colors cursor-pointer"
+                                                                    title="Klik untuk mencari berdasarkan nama produk ini"
+                                                                >
+                                                                    {item.product_name || "Varian Tidak Dikenal"}
+                                                                </button>
+                                                                {#if item.available_stock !== undefined}
+                                                                    <span class="text-[10px] px-1.5 py-0.5 rounded font-extrabold shrink-0 {item.available_stock <= 0 ? 'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300' : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300'}">
+                                                                        Stok: {item.available_stock} pcs
+                                                                    </span>
+                                                                {/if}
+                                                            </div>
+
+                                                            <div class="font-mono text-rose-600 dark:text-rose-400 font-semibold text-[10px] flex items-center flex-wrap gap-1.5">
+                                                                <button
+                                                                    type="button"
+                                                                    onclick={() => {
+                                                                        if (item.sku) {
+                                                                            variantSearchQuery = item.sku;
+                                                                            onVariantSearchInput(variantSearchQuery, Number(item.seller_id || group.seller_id || sellerId) || null);
+                                                                        }
+                                                                    }}
+                                                                    class="hover:underline cursor-pointer"
+                                                                    title="Klik untuk mencari SKU ini"
+                                                                >
+                                                                    {item.sku || '-'}
+                                                                </button>
+                                                                {#if item.size}
+                                                                    <span class="px-1.5 py-0.2 rounded bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-bold text-[10px]">
+                                                                        {item.size}
+                                                                    </span>
+                                                                {/if}
+                                                                {#if item.color}
+                                                                    <span class="text-slate-400 text-[10px]">({item.color})</span>
+                                                                {/if}
+                                                            </div>
+                                                        </div>
+                                                    {/if}
+
                                                     <!-- Filtered Variants Search List -->
                                                     <div class="max-h-48 overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-xl divide-y divide-slate-100 dark:divide-slate-800">
                                                         {#each searchResults.slice(0, 30) as v}
@@ -2246,11 +2306,16 @@
                                                                     editingVariantIndex = null;
                                                                     variantSearchQuery = "";
                                                                 }}
-                                                                class="w-full text-left p-2 hover:bg-rose-50 dark:hover:bg-rose-950/50 transition-colors flex items-center justify-between gap-2"
+                                                                class="w-full text-left p-2 hover:bg-rose-50 dark:hover:bg-rose-950/50 transition-colors flex items-center justify-between gap-2 {v.id === item.product_variant_id ? 'bg-amber-50/60 dark:bg-amber-950/30' : ''}"
                                                             >
                                                                 <div class="truncate">
-                                                                    <div class="font-bold text-slate-800 dark:text-slate-100 truncate">
-                                                                        {v.product_name}
+                                                                    <div class="font-bold text-slate-800 dark:text-slate-100 truncate flex items-center gap-1.5">
+                                                                        <span>{v.product_name}</span>
+                                                                        {#if v.id === item.product_variant_id}
+                                                                            <span class="px-1.5 py-0.2 rounded bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-300 text-[9px] font-bold shrink-0">
+                                                                                Pilihan Saat Ini
+                                                                            </span>
+                                                                        {/if}
                                                                     </div>
                                                                     <div class="font-mono text-[11px] text-rose-600 dark:text-rose-400 font-semibold flex items-center gap-1.5">
                                                                         <span>{v.sku}</span>
