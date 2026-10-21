@@ -109,7 +109,9 @@ class StockOutController extends Controller
 
         $query = ProductVariant::with([
             'product.seller:id,seller_name',
-            'stocks'
+            'stocks',
+            'bundleAsBundle.componentVariant.stocks',
+            'bundleAsBundle.componentVariant.product'
         ])
         ->select('id', 'product_id', 'sku', 'size', 'color', 'price');
 
@@ -134,7 +136,8 @@ class StockOutController extends Controller
         $variants = $query->latest('id')
             ->limit(30)
             ->get()
-            ->map(function ($v) {
+            ->map(function ($v) use ($warehouseId) {
+                $stockInfo = $this->getVariantStockInfo($v, $warehouseId);
                 return [
                     'id' => $v->id,
                     'product_id' => $v->product_id,
@@ -146,7 +149,11 @@ class StockOutController extends Controller
                     'color' => $v->color,
                     'price' => (float)$v->price,
                     'selling_price' => (float)$v->price,
-                    'stocks' => $v->stocks->pluck('qty', 'warehouse_id'),
+                    'stocks' => $stockInfo['is_bundle']
+                        ? $this->calculateBundleStocksMap($v)
+                        : $v->stocks->pluck('qty', 'warehouse_id'),
+                    'is_bundle' => $stockInfo['is_bundle'],
+                    'bundle_components' => $stockInfo['bundle_components'],
                 ];
             });
 
@@ -510,9 +517,16 @@ class StockOutController extends Controller
             ], 422);
         }
 
-        $variants = ProductVariant::with(['product.seller', 'stocks' => function ($q) use ($warehouseId) {
-            if ($warehouseId) $q->where('warehouse_id', $warehouseId);
-        }])->get();
+        $variants = ProductVariant::with([
+            'product.seller',
+            'stocks' => function ($q) use ($warehouseId) {
+                if ($warehouseId) $q->where('warehouse_id', $warehouseId);
+            },
+            'bundleAsBundle.componentVariant.stocks' => function ($q) use ($warehouseId) {
+                if ($warehouseId) $q->where('warehouse_id', $warehouseId);
+            },
+            'bundleAsBundle.componentVariant.product'
+        ])->get();
 
         $skuMap = [];
         foreach ($variants as $v) {
@@ -596,7 +610,7 @@ class StockOutController extends Controller
                     }
 
                     if ($partV) {
-                        $stk = $warehouseId ? ($partV->stocks->firstWhere('warehouse_id', $warehouseId)->qty ?? 0) : ($partV->stocks->sum('qty') ?? 0);
+                        $stockInfo = $this->getVariantStockInfo($partV, $warehouseId);
                         $subMatched[] = [
                             'product_variant_id' => $partV->id,
                             'sku' => $partV->sku,
@@ -608,7 +622,9 @@ class StockOutController extends Controller
                             'qty' => $qty,
                             'price' => (float)$partV->price,
                             'selling_price' => $unitSelling > 0 ? $unitSelling : (float)($partV->price ?? 0),
-                            'available_stock' => (int)$stk,
+                            'available_stock' => $stockInfo['available_stock'],
+                            'is_bundle' => $stockInfo['is_bundle'],
+                            'bundle_components' => $stockInfo['bundle_components'],
                         ];
                     } else {
                         $hasMissing = true;
@@ -629,7 +645,7 @@ class StockOutController extends Controller
             // 2. Direct resolve on single raw SKU
             $directV = $this->resolveVariantFromSkuAndSize($rawSku, $variantName, $rawSku, $skuMap);
             if ($directV) {
-                $stk = $warehouseId ? ($directV->stocks->firstWhere('warehouse_id', $warehouseId)->qty ?? 0) : ($directV->stocks->sum('qty') ?? 0);
+                $stockInfo = $this->getVariantStockInfo($directV, $warehouseId);
                 $unitSelling = $paymentAmt > 0 ? (float)round($paymentAmt / max(1, $qty), 2) : (float)($directV->price ?? 0);
                 $matchedItems[] = [
                     'product_variant_id' => $directV->id,
@@ -642,7 +658,9 @@ class StockOutController extends Controller
                     'qty' => $qty,
                     'price' => (float)$directV->price,
                     'selling_price' => $unitSelling,
-                    'available_stock' => (int)$stk,
+                    'available_stock' => $stockInfo['available_stock'],
+                    'is_bundle' => $stockInfo['is_bundle'],
+                    'bundle_components' => $stockInfo['bundle_components'],
                 ];
                 continue;
             }
@@ -968,68 +986,41 @@ class StockOutController extends Controller
         $addQty = (int)$validated['add_qty'];
         $note = $validated['note'] ?? 'Penyesuaian stok manual dari form Stock Out';
 
+        $variant = ProductVariant::with(['product', 'bundleAsBundle.componentVariant.stocks', 'bundleAsBundle.componentVariant.product'])->findOrFail($variantId);
+        $isBundle = ($variant->product && $variant->product->product_type === 'bundle') || $variant->bundleAsBundle->isNotEmpty();
+
+        $updatedComponents = [];
         $newStockQty = 0;
 
-        DB::transaction(function () use ($warehouseId, $variantId, $addQty, $note, &$newStockQty) {
-            $stockRecord = Stock::where('warehouse_id', $warehouseId)
-                ->where('product_variant_id', $variantId)
-                ->first();
+        DB::transaction(function () use ($warehouseId, $variant, $isBundle, $addQty, $note, &$newStockQty, &$updatedComponents) {
+            if ($isBundle && $variant->bundleAsBundle->isNotEmpty()) {
+                foreach ($variant->bundleAsBundle as $bItem) {
+                    $compV = $bItem->componentVariant;
+                    if (!$compV) continue;
+                    $compReqQty = (int)($bItem->quantity ?? $bItem->qty ?? 1);
+                    $compAddQty = $addQty * max(1, $compReqQty);
 
-            if (!$stockRecord) {
-                $stockRecord = new Stock();
-                $stockRecord->warehouse_id = $warehouseId;
-                $stockRecord->product_variant_id = $variantId;
-                $stockRecord->qty = 0;
-                if (\Illuminate\Support\Facades\Schema::hasColumn('stocks', 'allocated_qty')) {
-                    $stockRecord->allocated_qty = 0;
-                }
-                $stockRecord->save();
-            }
-
-            $qtyBefore = (int)$stockRecord->qty;
-            $stockRecord->increment('qty', $addQty);
-            $newStockQty = (int)$stockRecord->fresh()->qty;
-
-            try {
-                $logData = [
-                    'stock_id' => $stockRecord->id,
-                    'user_id' => auth()->id() ?? 1,
-                    'type' => 'MANUAL_ADD',
-                    'quantity_before' => $qtyBefore,
-                    'quantity_after' => $newStockQty,
-                    'change_amount' => $addQty,
-                    'note' => $note,
-                    'reference_type' => StockOut::class,
-                    'reference_id' => null,
-                ];
-
-                if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'product_variant_id')) {
-                    $logData['product_variant_id'] = $variantId;
-                }
-                if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'warehouse_id')) {
-                    $logData['warehouse_id'] = $warehouseId;
-                }
-                if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'qty_before')) {
-                    $logData['qty_before'] = $qtyBefore;
-                }
-                if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'qty_change')) {
-                    $logData['qty_change'] = $addQty;
-                }
-                if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'qty_after')) {
-                    $logData['qty_after'] = $newStockQty;
+                    $this->adjustSingleVariantStock($warehouseId, $compV->id, $compAddQty, $note . " (Komponen Bundle: {$variant->sku})");
                 }
 
-                StockLog::create($logData);
-            } catch (\Throwable $e) {
-                \Log::warning("Gagal mencatat StockLog: " . $e->getMessage());
+                $freshVariant = ProductVariant::with(['product', 'bundleAsBundle.componentVariant.stocks', 'bundleAsBundle.componentVariant.product'])->find($variant->id);
+                $stockInfo = $this->getVariantStockInfo($freshVariant, $warehouseId);
+                $newStockQty = $stockInfo['available_stock'];
+                $updatedComponents = $stockInfo['bundle_components'];
+            } else {
+                $newStockQty = $this->adjustSingleVariantStock($warehouseId, $variant->id, $addQty, $note);
             }
         });
 
         return response()->json([
             'success' => true,
-            'message' => "Berhasil menambahkan {$addQty} pcs stok ke gudang.",
+            'message' => $isBundle
+                ? "Berhasil menambahkan stok komponen bundle ({$addQty} set) ke gudang."
+                : "Berhasil menambahkan {$addQty} pcs stok ke gudang.",
             'new_stock' => $newStockQty,
             'variant_id' => $variantId,
+            'is_bundle' => $isBundle,
+            'bundle_components' => $updatedComponents,
         ]);
     }
 
@@ -1045,74 +1036,166 @@ class StockOutController extends Controller
         $warehouseId = (int)$validated['warehouse_id'];
         $items = $validated['items'];
         $updatedList = [];
+        $bundleUpdates = [];
 
-        DB::transaction(function () use ($warehouseId, $items, &$updatedList) {
+        DB::transaction(function () use ($warehouseId, $items, &$updatedList, &$bundleUpdates) {
             foreach ($items as $item) {
                 $variantId = (int)$item['variant_id'];
                 $addQty = (int)$item['add_qty'];
 
-                $stockRecord = Stock::where('warehouse_id', $warehouseId)
-                    ->where('product_variant_id', $variantId)
-                    ->first();
+                $variant = ProductVariant::with(['product', 'bundleAsBundle.componentVariant.stocks', 'bundleAsBundle.componentVariant.product'])->find($variantId);
+                if (!$variant) continue;
 
-                if (!$stockRecord) {
-                    $stockRecord = new Stock();
-                    $stockRecord->warehouse_id = $warehouseId;
-                    $stockRecord->product_variant_id = $variantId;
-                    $stockRecord->qty = 0;
-                    if (\Illuminate\Support\Facades\Schema::hasColumn('stocks', 'allocated_qty')) {
-                        $stockRecord->allocated_qty = 0;
+                $isBundle = ($variant->product && $variant->product->product_type === 'bundle') || $variant->bundleAsBundle->isNotEmpty();
+
+                if ($isBundle && $variant->bundleAsBundle->isNotEmpty()) {
+                    foreach ($variant->bundleAsBundle as $bItem) {
+                        $compV = $bItem->componentVariant;
+                        if (!$compV) continue;
+                        $compReqQty = (int)($bItem->quantity ?? $bItem->qty ?? 1);
+                        $compAddQty = $addQty * max(1, $compReqQty);
+                        $newCompStock = $this->adjustSingleVariantStock($warehouseId, $compV->id, $compAddQty, "Penyesuaian stok massal komponen bundle: {$variant->sku}");
+                        $updatedList[$compV->id] = $newCompStock;
                     }
-                    $stockRecord->save();
+
+                    $freshVariant = ProductVariant::with(['product', 'bundleAsBundle.componentVariant.stocks', 'bundleAsBundle.componentVariant.product'])->find($variant->id);
+                    $stockInfo = $this->getVariantStockInfo($freshVariant, $warehouseId);
+                    $updatedList[$variant->id] = $stockInfo['available_stock'];
+                    $bundleUpdates[$variant->id] = $stockInfo['bundle_components'];
+                } else {
+                    $newStockQty = $this->adjustSingleVariantStock($warehouseId, $variant->id, $addQty, 'Penyesuaian stok massal dari form Stock Out');
+                    $updatedList[$variant->id] = $newStockQty;
                 }
-
-                $qtyBefore = (int)$stockRecord->qty;
-                $stockRecord->increment('qty', $addQty);
-                $newStockQty = (int)$stockRecord->fresh()->qty;
-
-                try {
-                    $logData = [
-                        'stock_id' => $stockRecord->id,
-                        'user_id' => auth()->id() ?? 1,
-                        'type' => 'MANUAL_ADD',
-                        'quantity_before' => $qtyBefore,
-                        'quantity_after' => $newStockQty,
-                        'change_amount' => $addQty,
-                        'note' => 'Penyesuaian stok massal dari form Stock Out',
-                        'reference_type' => StockOut::class,
-                        'reference_id' => null,
-                    ];
-
-                    if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'product_variant_id')) {
-                        $logData['product_variant_id'] = $variantId;
-                    }
-                    if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'warehouse_id')) {
-                        $logData['warehouse_id'] = $warehouseId;
-                    }
-                    if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'qty_before')) {
-                        $logData['qty_before'] = $qtyBefore;
-                    }
-                    if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'qty_change')) {
-                        $logData['qty_change'] = $addQty;
-                    }
-                    if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'qty_after')) {
-                        $logData['qty_after'] = $newStockQty;
-                    }
-
-                    StockLog::create($logData);
-                } catch (\Throwable $e) {
-                    \Log::warning("Gagal mencatat StockLog bulk: " . $e->getMessage());
-                }
-
-                $updatedList[$variantId] = $newStockQty;
             }
         });
 
         return response()->json([
             'success' => true,
-            'message' => "Berhasil menambahkan stok untuk " . count($items) . " produk ke gudang.",
+            'message' => 'Berhasil menyesuaikan stok untuk ' . count($items) . ' produk ke gudang.',
             'updated_stocks' => $updatedList,
+            'bundle_updates' => $bundleUpdates,
         ]);
+    }
+
+    private function adjustSingleVariantStock(int $warehouseId, int $variantId, int $addQty, string $note): int
+    {
+        $stockRecord = Stock::where('warehouse_id', $warehouseId)
+            ->where('product_variant_id', $variantId)
+            ->first();
+
+        if (!$stockRecord) {
+            $stockRecord = new Stock();
+            $stockRecord->warehouse_id = $warehouseId;
+            $stockRecord->product_variant_id = $variantId;
+            $stockRecord->qty = 0;
+            if (\Illuminate\Support\Facades\Schema::hasColumn('stocks', 'allocated_qty')) {
+                $stockRecord->allocated_qty = 0;
+            }
+            $stockRecord->save();
+        }
+
+        $qtyBefore = (int)$stockRecord->qty;
+        $stockRecord->increment('qty', $addQty);
+        $newStockQty = (int)$stockRecord->fresh()->qty;
+
+        try {
+            $logData = [
+                'stock_id' => $stockRecord->id,
+                'user_id' => auth()->id() ?? 1,
+                'type' => 'MANUAL_ADD',
+                'quantity_before' => $qtyBefore,
+                'quantity_after' => $newStockQty,
+                'change_amount' => $addQty,
+                'note' => $note,
+                'reference_type' => StockOut::class,
+                'reference_id' => null,
+            ];
+
+            if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'product_variant_id')) {
+                $logData['product_variant_id'] = $variantId;
+            }
+            if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'warehouse_id')) {
+                $logData['warehouse_id'] = $warehouseId;
+            }
+            if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'qty_before')) {
+                $logData['qty_before'] = $qtyBefore;
+            }
+            if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'qty_change')) {
+                $logData['qty_change'] = $addQty;
+            }
+            if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'qty_after')) {
+                $logData['qty_after'] = $newStockQty;
+            }
+
+            StockLog::create($logData);
+        } catch (\Throwable $e) {
+            \Log::warning("Gagal mencatat StockLog: " . $e->getMessage());
+        }
+
+        return $newStockQty;
+    }
+
+    private function getVariantStockInfo($v, $warehouseId = null): array
+    {
+        $isBundle = ($v->product && $v->product->product_type === 'bundle') || ($v->bundleAsBundle && $v->bundleAsBundle->isNotEmpty());
+
+        if ($isBundle && $v->bundleAsBundle && $v->bundleAsBundle->isNotEmpty()) {
+            $possibleList = [];
+            $components = [];
+            foreach ($v->bundleAsBundle as $bItem) {
+                $compV = $bItem->componentVariant;
+                $reqQty = (int)($bItem->quantity ?? $bItem->qty ?? 1);
+                $compStock = 0;
+                if ($compV) {
+                    $compStock = $warehouseId
+                        ? ($compV->stocks->firstWhere('warehouse_id', $warehouseId)->qty ?? 0)
+                        : ($compV->stocks->sum('qty') ?? 0);
+                }
+                $possibleList[] = $reqQty > 0 ? (int)floor($compStock / $reqQty) : 0;
+                $components[] = [
+                    'component_variant_id' => $bItem->component_variant_id,
+                    'sku' => $compV->sku ?? '',
+                    'product_name' => $compV->product->product_name ?? '',
+                    'size' => $compV->size ?? '',
+                    'color' => $compV->color ?? '',
+                    'quantity' => $reqQty,
+                    'available_stock' => (int)$compStock,
+                ];
+            }
+            $availableStock = !empty($possibleList) ? min($possibleList) : 0;
+            return [
+                'is_bundle' => true,
+                'available_stock' => (int)$availableStock,
+                'bundle_components' => $components,
+            ];
+        }
+
+        $stk = $warehouseId
+            ? ($v->stocks->firstWhere('warehouse_id', $warehouseId)->qty ?? 0)
+            : ($v->stocks->sum('qty') ?? 0);
+
+        return [
+            'is_bundle' => false,
+            'available_stock' => (int)$stk,
+            'bundle_components' => [],
+        ];
+    }
+
+    private function calculateBundleStocksMap($v): array
+    {
+        $warehouses = Warehouse::pluck('id');
+        $stocksMap = [];
+        foreach ($warehouses as $wId) {
+            $possibleList = [];
+            foreach ($v->bundleAsBundle as $bItem) {
+                $compV = $bItem->componentVariant;
+                $reqQty = (int)($bItem->quantity ?? $bItem->qty ?? 1);
+                $compStock = $compV ? ($compV->stocks->firstWhere('warehouse_id', $wId)->qty ?? 0) : 0;
+                $possibleList[] = $reqQty > 0 ? (int)floor($compStock / $reqQty) : 0;
+            }
+            $stocksMap[$wId] = !empty($possibleList) ? min($possibleList) : 0;
+        }
+        return $stocksMap;
     }
 
     private function parseBundleSkuStr($skuStr, $variationStr, $qty)

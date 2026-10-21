@@ -32,6 +32,16 @@
         Building2,
     } from "@lucide/svelte";
 
+    interface BundleComponent {
+        component_variant_id: number;
+        sku: string;
+        product_name: string;
+        size?: string;
+        color?: string;
+        quantity: number;
+        available_stock: number;
+    }
+
     interface VariantData {
         id: number;
         product_id: number;
@@ -44,6 +54,8 @@
         price: number;
         selling_price: number;
         stocks: Record<number, number>; // warehouse_id -> qty
+        is_bundle?: boolean;
+        bundle_components?: BundleComponent[];
     }
 
     interface FormItem {
@@ -60,6 +72,8 @@
         price: number;
         selling_price: number;
         available_stock?: number;
+        is_bundle?: boolean;
+        bundle_components?: BundleComponent[];
     }
 
     interface ResiItem {
@@ -348,6 +362,8 @@
             price: v.price,
             selling_price: currentSelling > 0 ? currentSelling : v.selling_price,
             available_stock: avail,
+            is_bundle: v.is_bundle ?? false,
+            bundle_components: v.bundle_components ?? [],
         };
     }
 
@@ -655,6 +671,8 @@
                         price: Number(m.price || 0),
                         selling_price: Number(Number(m.selling_price || 0).toFixed(2)),
                         available_stock: m.available_stock,
+                        is_bundle: m.is_bundle ?? false,
+                        bundle_components: m.bundle_components ?? [],
                     });
                 });
             }
@@ -834,9 +852,16 @@
             }
 
             if (res.ok && data.success) {
+                const isBundle = data.is_bundle;
+                const bundleComponents = data.bundle_components;
+
                 formItems = formItems.map((fi) => {
                     if (fi.product_variant_id === variantId) {
-                        return { ...fi, available_stock: data.new_stock };
+                        return {
+                            ...fi,
+                            available_stock: data.new_stock,
+                            bundle_components: isBundle && bundleComponents ? bundleComponents : fi.bundle_components,
+                        };
                     }
                     return fi;
                 });
@@ -848,18 +873,112 @@
                                 ...v.stocks,
                                 [Number(warehouseId)]: data.new_stock,
                             },
+                            bundle_components: isBundle && bundleComponents ? bundleComponents : v.bundle_components,
                         };
                     }
                     return v;
                 });
                 adjustSuccessToast = data.message;
-                setTimeout(() => (adjustSuccessToast = null), 3000);
+                setTimeout(() => (adjustSuccessToast = null), 3500);
             } else {
                 alert(data.message || "Gagal menambahkan stok.");
             }
         } catch (e: any) {
             console.error("Quick adjust error:", e);
             alert("Terjadi kesalahan saat menambahkan stok: " + (e?.message || "Koneksi bermasalah"));
+        } finally {
+            adjustingVariantId = null;
+        }
+    }
+
+    async function handleQuickAdjustComponent(compVariantId: number, addQty: number, itemIndex: number) {
+        if (!warehouseId) {
+            alert("Harap tentukan 1. Gudang Asal terlebih dahulu di atas!");
+            return;
+        }
+        if (!addQty || addQty < 1) {
+            alert("Jumlah penambahan stok minimal 1 pcs!");
+            return;
+        }
+
+        adjustingVariantId = compVariantId;
+        try {
+            const res = await fetch("/superadmin/warehouse/stock-out/quick-adjust-stock", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Accept: "application/json",
+                    "X-Requested-With": "XMLHttpRequest",
+                    "X-CSRF-TOKEN": getCsrfHeader(),
+                },
+                body: JSON.stringify({
+                    warehouse_id: Number(warehouseId),
+                    variant_id: compVariantId,
+                    add_qty: addQty,
+                }),
+            });
+
+            const text = await res.text();
+            let data: any;
+            try {
+                data = JSON.parse(text);
+            } catch (err) {
+                console.error("Non-JSON response:", text);
+                if (res.status === 419) {
+                    alert("Sesi browser kedaluwarsa (419). Harap refresh halaman terlebih dahulu.");
+                    return;
+                }
+                alert(`Gagal (HTTP ${res.status}): ${text.substring(0, 120)}`);
+                return;
+            }
+
+            if (res.ok && data.success) {
+                // Update the component's available stock across all bundle items and localVariants
+                formItems = formItems.map((fi) => {
+                    if (fi.is_bundle && fi.bundle_components && fi.bundle_components.length > 0) {
+                        const newComps = fi.bundle_components.map((c) => {
+                            if (c.component_variant_id === compVariantId) {
+                                return { ...c, available_stock: data.new_stock };
+                            }
+                            return c;
+                        });
+                        const possibleList = newComps.map((c) =>
+                            Math.floor((c.available_stock || 0) / Math.max(1, c.quantity || 1))
+                        );
+                        const newBundleStock = possibleList.length > 0 ? Math.min(...possibleList) : 0;
+                        return {
+                            ...fi,
+                            bundle_components: newComps,
+                            available_stock: newBundleStock,
+                        };
+                    }
+                    if (fi.product_variant_id === compVariantId) {
+                        return { ...fi, available_stock: data.new_stock };
+                    }
+                    return fi;
+                });
+
+                localVariants = localVariants.map((v) => {
+                    if (v.id === compVariantId) {
+                        return {
+                            ...v,
+                            stocks: {
+                                ...v.stocks,
+                                [Number(warehouseId)]: data.new_stock,
+                            },
+                        };
+                    }
+                    return v;
+                });
+
+                adjustSuccessToast = data.message || `Berhasil menambahkan ${addQty} pcs stok komponen.`;
+                setTimeout(() => (adjustSuccessToast = null), 3500);
+            } else {
+                alert(data.message || "Gagal menambahkan stok komponen.");
+            }
+        } catch (err: any) {
+            console.error("Quick adjust component error:", err);
+            alert("Terjadi kesalahan saat menyesuaikan stok komponen: " + (err?.message || "Koneksi bermasalah"));
         } finally {
             adjustingVariantId = null;
         }
@@ -872,15 +991,35 @@
         }
         if (deficitItems.length === 0) return;
 
-        const payloadItems = deficitItems.map((d) => {
-            const manualAdd =
-                adjustInputMap[d.item.product_variant_id!] ??
-                (d.diff > 0 ? d.diff : d.qtyOut);
-            return {
-                variant_id: d.item.product_variant_id!,
-                add_qty: Math.max(1, manualAdd),
-            };
-        });
+        // Collect items to adjust: For bundles, adjust their deficient components!
+        const payloadMap = new Map<number, number>();
+
+        for (const d of deficitItems) {
+            if (d.item.is_bundle && d.item.bundle_components && d.item.bundle_components.length > 0) {
+                for (const comp of d.item.bundle_components) {
+                    const reqForBundle = (comp.quantity || 1) * d.qtyOut;
+                    const compDeficit = Math.max(0, reqForBundle - (comp.available_stock || 0));
+                    const manualAdd = adjustInputMap[comp.component_variant_id] ?? compDeficit;
+                    if (manualAdd > 0) {
+                        const current = payloadMap.get(comp.component_variant_id) ?? 0;
+                        payloadMap.set(comp.component_variant_id, Math.max(current, manualAdd));
+                    }
+                }
+            } else if (d.item.product_variant_id) {
+                const manualAdd =
+                    adjustInputMap[d.item.product_variant_id] ??
+                    (d.diff > 0 ? d.diff : d.qtyOut);
+                const current = payloadMap.get(d.item.product_variant_id) ?? 0;
+                payloadMap.set(d.item.product_variant_id, Math.max(current, manualAdd));
+            }
+        }
+
+        const payloadItems = Array.from(payloadMap.entries()).map(([variant_id, add_qty]) => ({
+            variant_id,
+            add_qty: Math.max(1, add_qty),
+        }));
+
+        if (payloadItems.length === 0) return;
 
         isAdjustingAll = true;
         try {
@@ -914,18 +1053,43 @@
 
             if (res.ok && data.success && data.updated_stocks) {
                 const stockMap = data.updated_stocks;
+                const bundleUpdates = data.bundle_updates || {};
+
                 formItems = formItems.map((fi) => {
-                    if (
-                        fi.product_variant_id &&
-                        stockMap[fi.product_variant_id] !== undefined
-                    ) {
+                    // If regular variant
+                    if (fi.product_variant_id && stockMap[fi.product_variant_id] !== undefined && !fi.is_bundle) {
                         return {
                             ...fi,
                             available_stock: stockMap[fi.product_variant_id],
                         };
                     }
+                    // If bundle variant
+                    if (fi.is_bundle && fi.bundle_components) {
+                        let newComps = fi.bundle_components.map((c) => {
+                            if (stockMap[c.component_variant_id] !== undefined) {
+                                return { ...c, available_stock: stockMap[c.component_variant_id] };
+                            }
+                            return c;
+                        });
+                        if (fi.product_variant_id && bundleUpdates[fi.product_variant_id]) {
+                            newComps = bundleUpdates[fi.product_variant_id];
+                        }
+                        const possibleList = newComps.map((c) =>
+                            Math.floor((c.available_stock || 0) / Math.max(1, c.quantity || 1))
+                        );
+                        const newBundleStock = stockMap[fi.product_variant_id!] !== undefined
+                            ? stockMap[fi.product_variant_id!]
+                            : (possibleList.length > 0 ? Math.min(...possibleList) : 0);
+
+                        return {
+                            ...fi,
+                            bundle_components: newComps,
+                            available_stock: newBundleStock,
+                        };
+                    }
                     return fi;
                 });
+
                 localVariants = localVariants.map((v) => {
                     if (stockMap[v.id] !== undefined) {
                         return {
@@ -938,7 +1102,8 @@
                     }
                     return v;
                 });
-                adjustSuccessToast = data.message;
+
+                adjustSuccessToast = data.message || `Berhasil memperbarui stok seluruh produk selisih.`;
                 setTimeout(() => (adjustSuccessToast = null), 3500);
             } else {
                 alert(data.message || "Gagal menambahkan stok massal.");
@@ -1962,86 +2127,261 @@
                         </thead>
                         <tbody class="divide-y divide-slate-200 dark:divide-slate-800 font-medium">
                             {#each deficitItems as def, idx}
-                                <tr class="hover:bg-rose-50/30 dark:hover:bg-rose-950/20 transition-colors">
-                                    <td class="p-3 text-center text-slate-400 text-[11px]">{idx + 1}</td>
-                                    <td class="p-3">
-                                        <div class="font-bold text-slate-800 dark:text-slate-100 truncate max-w-sm">
-                                            {def.item.product_name || "Produk"}
-                                        </div>
-                                        <div class="font-mono text-rose-600 dark:text-rose-400 font-semibold text-[11px] flex items-center gap-1.5 mt-0.5">
-                                            <span>{def.item.sku}</span>
-                                            {#if def.item.size}
-                                                <span class="px-1.5 py-0.2 rounded bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-[10px] font-bold">
-                                                    {def.item.size}
+                                {#if def.item.is_bundle && def.item.bundle_components && def.item.bundle_components.length > 0}
+                                    <!-- Baris Header Bundle -->
+                                    <tr class="bg-indigo-50/50 dark:bg-indigo-950/30 border-t-2 border-indigo-200 dark:border-indigo-900 transition-colors">
+                                        <td class="p-3 text-center text-slate-500 font-bold text-[11px]">{idx + 1}</td>
+                                        <td class="p-3">
+                                            <div class="flex items-center gap-1.5 flex-wrap mb-1">
+                                                <span class="px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 dark:bg-indigo-900/80 dark:text-indigo-200 text-[10px] font-extrabold border border-indigo-200 dark:border-indigo-800 flex items-center gap-1">
+                                                    <Layers class="w-3 h-3 text-indigo-500" />
+                                                    PAKET BUNDLE ({def.item.bundle_components.length} Komponen)
                                                 </span>
-                                            {/if}
-                                            {#if def.item.color}
-                                                <span class="text-slate-400 text-[10px]">({def.item.color})</span>
-                                            {/if}
-                                        </div>
-                                    </td>
-                                    <td class="p-3 text-slate-600 dark:text-slate-400 truncate">
-                                        {def.item.seller_name || "Mitra"}
-                                    </td>
-                                    <td class="p-3 text-center">
-                                        <span class="px-2 py-1 rounded-md text-[11px] font-extrabold {def.isZero ? 'bg-rose-200 text-rose-900 dark:bg-rose-900/80 dark:text-rose-200' : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'}">
-                                            {def.avail} pcs
-                                        </span>
-                                    </td>
-                                    <td class="p-3 text-center">
-                                        <input
-                                            type="number"
-                                            min="1"
-                                            bind:value={formItems[def.index].qty}
-                                            class="w-16 text-center rounded-xl border border-rose-300 dark:border-rose-700 bg-white dark:bg-slate-900 py-1 text-xs font-extrabold text-rose-600 dark:text-rose-400 focus:ring-2 focus:ring-rose-500"
-                                            title="Ubah Qty Keluar jika diperlukan"
-                                        />
-                                    </td>
-                                    <td class="p-3 text-center">
-                                        {#if def.isZero}
-                                            <span class="text-[11px] font-extrabold text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/60 px-2 py-0.5 rounded-full border border-rose-200 dark:border-rose-800/60">
-                                                Stok 0 (Kosong)
+                                            </div>
+                                            <div class="font-bold text-slate-900 dark:text-slate-100 truncate max-w-sm">
+                                                {def.item.product_name || "Produk Bundle"}
+                                            </div>
+                                            <div class="font-mono text-indigo-600 dark:text-indigo-400 font-bold text-[11px] flex items-center gap-1.5 mt-0.5">
+                                                <span>{def.item.sku}</span>
+                                                {#if def.item.size}
+                                                    <span class="px-1.5 py-0.2 rounded bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-[10px] font-bold">
+                                                        {def.item.size}
+                                                    </span>
+                                                {/if}
+                                            </div>
+                                            <div class="text-[10px] text-indigo-700 dark:text-indigo-300/80 mt-1 font-normal flex items-center gap-1">
+                                                <span>↳ Stok paket dihitung dari komponen. Isi stok pada masing-masing SKU komponen di bawah:</span>
+                                            </div>
+                                        </td>
+                                        <td class="p-3 text-slate-600 dark:text-slate-400 truncate">
+                                            {def.item.seller_name || "Mitra"}
+                                        </td>
+                                        <td class="p-3 text-center">
+                                            <span class="px-2 py-1 rounded-md text-[11px] font-extrabold {def.isZero ? 'bg-rose-200 text-rose-900 dark:bg-rose-900/80 dark:text-rose-200' : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'}">
+                                                {def.avail} set
                                             </span>
-                                        {:else}
-                                            <span class="text-[11px] font-extrabold text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/60 px-2 py-0.5 rounded-full border border-amber-200 dark:border-amber-800/60">
-                                                Kurang {def.diff} pcs
-                                            </span>
-                                        {/if}
-                                    </td>
-                                    <td class="p-3 text-right">
-                                        <div class="flex items-center justify-end gap-1.5">
-                                            <div class="relative w-20">
+                                        </td>
+                                        <td class="p-3 text-center">
+                                            <div class="flex items-center justify-center gap-1">
                                                 <input
                                                     type="number"
                                                     min="1"
-                                                    placeholder="Qty"
-                                                    value={adjustInputMap[def.item.product_variant_id!] ?? (def.diff > 0 ? def.diff : def.qtyOut)}
-                                                    oninput={(e) => {
-                                                        adjustInputMap[def.item.product_variant_id!] = Number((e.target as HTMLInputElement).value);
-                                                    }}
-                                                    class="w-full text-center rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 py-1 text-xs font-bold text-slate-800 dark:text-slate-100"
+                                                    bind:value={formItems[def.index].qty}
+                                                    class="w-16 text-center rounded-xl border border-rose-300 dark:border-rose-700 bg-white dark:bg-slate-900 py-1 text-xs font-extrabold text-rose-600 dark:text-rose-400 focus:ring-2 focus:ring-rose-500"
+                                                    title="Ubah Qty Keluar jika diperlukan"
                                                 />
+                                                <span class="text-[10px] text-slate-400">set</span>
                                             </div>
-                                            <button
-                                                type="button"
-                                                disabled={adjustingVariantId === def.item.product_variant_id || !warehouseId}
-                                                onclick={() => {
-                                                    const addQty = adjustInputMap[def.item.product_variant_id!] ?? (def.diff > 0 ? def.diff : def.qtyOut);
-                                                    handleQuickAdjustSingle(def.item.product_variant_id!, addQty, def.index);
-                                                }}
-                                                class="px-2.5 py-1 text-xs font-bold rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white flex items-center gap-1 transition-all shadow-xs shrink-0"
-                                                title="Tambah stok ke gudang asal sekarang"
-                                            >
-                                                {#if adjustingVariantId === def.item.product_variant_id}
-                                                    <RefreshCw class="w-3.5 h-3.5 animate-spin" />
+                                        </td>
+                                        <td class="p-3 text-center">
+                                            {#if def.isZero}
+                                                <span class="text-[11px] font-extrabold text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/60 px-2 py-0.5 rounded-full border border-rose-200 dark:border-rose-800/60">
+                                                    Stok 0 (Kosong)
+                                                </span>
+                                            {:else}
+                                                <span class="text-[11px] font-extrabold text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/60 px-2 py-0.5 rounded-full border border-amber-200 dark:border-amber-800/60">
+                                                    Kurang {def.diff} set
+                                                </span>
+                                            {/if}
+                                        </td>
+                                        <td class="p-3 text-right">
+                                            <div class="flex items-center justify-end gap-1.5">
+                                                <button
+                                                    type="button"
+                                                    disabled={adjustingVariantId === def.item.product_variant_id || !warehouseId}
+                                                    onclick={() => {
+                                                        const addQty = adjustInputMap[def.item.product_variant_id!] ?? (def.diff > 0 ? def.diff : def.qtyOut);
+                                                        handleQuickAdjustSingle(def.item.product_variant_id!, addQty, def.index);
+                                                    }}
+                                                    class="px-2.5 py-1 text-[11px] font-bold rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white flex items-center gap-1 transition-all shadow-xs shrink-0"
+                                                    title="Top-Up seluruh komponen bundle sekaligus untuk memenuhi pesanan"
+                                                >
+                                                    {#if adjustingVariantId === def.item.product_variant_id}
+                                                        <RefreshCw class="w-3.5 h-3.5 animate-spin" />
+                                                    {:else}
+                                                        <Plus class="w-3.5 h-3.5" />
+                                                        <span>Top-Up Semua Isi Bundle (+{def.diff > 0 ? def.diff : def.qtyOut} set)</span>
+                                                    {/if}
+                                                </button>
+                                            </div>
+                                        </td>
+                                    </tr>
+
+                                    <!-- Sub-baris Komponen Bundle -->
+                                    {#each def.item.bundle_components as comp, cIdx}
+                                        {@const compNeeded = (comp.quantity || 1) * (formItems[def.index]?.qty || 0)}
+                                        {@const compAvail = Number(comp.available_stock ?? 0)}
+                                        {@const compDiff = Math.max(0, compNeeded - compAvail)}
+                                        <tr class="bg-indigo-50/20 dark:bg-indigo-950/10 hover:bg-indigo-50/40 dark:hover:bg-indigo-950/20 transition-colors border-l-4 border-indigo-400 dark:border-indigo-600">
+                                            <td class="p-2.5 text-center text-indigo-400 font-bold text-xs">
+                                                ↳
+                                            </td>
+                                            <td class="p-2.5">
+                                                <div class="font-bold text-slate-800 dark:text-slate-200 text-xs truncate max-w-sm">
+                                                    {comp.product_name}
+                                                </div>
+                                                <div class="font-mono text-indigo-600 dark:text-indigo-400 font-bold text-[11px] flex items-center gap-1.5 mt-0.5">
+                                                    <span>{comp.sku}</span>
+                                                    {#if comp.size}
+                                                        <span class="px-1.5 py-0.2 rounded bg-indigo-100 dark:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 text-[10px] font-bold">
+                                                            {comp.size}
+                                                        </span>
+                                                    {/if}
+                                                    {#if comp.color}
+                                                        <span class="text-slate-400 text-[10px]">({comp.color})</span>
+                                                    {/if}
+                                                    <span class="px-1.5 py-0.2 rounded bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-[10px]">
+                                                        1 Set = {comp.quantity} pcs
+                                                    </span>
+                                                </div>
+                                            </td>
+                                            <td class="p-2.5 text-slate-500 dark:text-slate-400 text-xs truncate">
+                                                {comp.seller_name || def.item.seller_name || "-"}
+                                            </td>
+                                            <td class="p-2.5 text-center">
+                                                <span class="px-2 py-0.5 rounded text-[11px] font-bold {compAvail <= 0 ? 'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300' : compDiff > 0 ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300' : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'}">
+                                                    {compAvail} pcs
+                                                </span>
+                                            </td>
+                                            <td class="p-2.5 text-center text-xs font-bold text-slate-700 dark:text-slate-200">
+                                                <span>{compNeeded} pcs</span>
+                                                <span class="text-[10px] text-slate-400 block font-normal">
+                                                    ({comp.quantity} × {formItems[def.index]?.qty || 0} set)
+                                                </span>
+                                            </td>
+                                            <td class="p-2.5 text-center">
+                                                {#if compAvail <= 0}
+                                                    <span class="text-[10px] font-extrabold text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/60 px-2 py-0.5 rounded-full border border-rose-200 dark:border-rose-800/60">
+                                                        Stok 0 (Kurang {compDiff} pcs)
+                                                    </span>
+                                                {:else if compDiff > 0}
+                                                    <span class="text-[10px] font-extrabold text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/60 px-2 py-0.5 rounded-full border border-amber-200 dark:border-amber-800/60">
+                                                        Kurang {compDiff} pcs
+                                                    </span>
                                                 {:else}
-                                                    <Plus class="w-3.5 h-3.5" />
-                                                    <span>Tambah Stok</span>
+                                                    <span class="text-[10px] font-extrabold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/60 px-2 py-0.5 rounded-full border border-emerald-200 dark:border-emerald-800/60">
+                                                        Cukup ({compAvail} pcs)
+                                                    </span>
                                                 {/if}
-                                            </button>
-                                        </div>
-                                    </td>
-                                </tr>
+                                            </td>
+                                            <td class="p-2.5 text-right">
+                                                <div class="flex items-center justify-end gap-1.5">
+                                                    <div class="relative w-20">
+                                                        <input
+                                                            type="number"
+                                                            min="1"
+                                                            placeholder="Qty"
+                                                            value={adjustInputMap[comp.component_variant_id] ?? (compDiff > 0 ? compDiff : (compAvail <= 0 ? compNeeded : comp.quantity))}
+                                                            oninput={(e) => {
+                                                                adjustInputMap[comp.component_variant_id] = Number((e.target as HTMLInputElement).value);
+                                                            }}
+                                                            class="w-full text-center rounded-xl border border-indigo-200 dark:border-indigo-800 bg-white dark:bg-slate-900 py-1 text-xs font-bold text-slate-800 dark:text-slate-100"
+                                                        />
+                                                    </div>
+                                                    <button
+                                                        type="button"
+                                                        disabled={adjustingVariantId === comp.component_variant_id || !warehouseId}
+                                                        onclick={() => {
+                                                            const addQty = adjustInputMap[comp.component_variant_id] ?? (compDiff > 0 ? compDiff : (compAvail <= 0 ? compNeeded : comp.quantity));
+                                                            handleQuickAdjustComponent(comp.component_variant_id, addQty, def.index);
+                                                        }}
+                                                        class="px-2.5 py-1 text-xs font-bold rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white flex items-center gap-1 transition-all shadow-xs shrink-0"
+                                                        title="Tambah stok ke varian komponen ini"
+                                                    >
+                                                        {#if adjustingVariantId === comp.component_variant_id}
+                                                            <RefreshCw class="w-3.5 h-3.5 animate-spin" />
+                                                        {:else}
+                                                            <Plus class="w-3.5 h-3.5" />
+                                                            <span>Tambah {comp.sku}</span>
+                                                        {/if}
+                                                    </button>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    {/each}
+                                {:else}
+                                    <!-- Baris Reguler (Non-Bundle) -->
+                                    <tr class="hover:bg-rose-50/30 dark:hover:bg-rose-950/20 transition-colors">
+                                        <td class="p-3 text-center text-slate-400 text-[11px]">{idx + 1}</td>
+                                        <td class="p-3">
+                                            <div class="font-bold text-slate-800 dark:text-slate-100 truncate max-w-sm">
+                                                {def.item.product_name || "Produk"}
+                                            </div>
+                                            <div class="font-mono text-rose-600 dark:text-rose-400 font-semibold text-[11px] flex items-center gap-1.5 mt-0.5">
+                                                <span>{def.item.sku}</span>
+                                                {#if def.item.size}
+                                                    <span class="px-1.5 py-0.2 rounded bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-[10px] font-bold">
+                                                        {def.item.size}
+                                                    </span>
+                                                {/if}
+                                                {#if def.item.color}
+                                                    <span class="text-slate-400 text-[10px]">({def.item.color})</span>
+                                                {/if}
+                                            </div>
+                                        </td>
+                                        <td class="p-3 text-slate-600 dark:text-slate-400 truncate">
+                                            {def.item.seller_name || "Mitra"}
+                                        </td>
+                                        <td class="p-3 text-center">
+                                            <span class="px-2 py-1 rounded-md text-[11px] font-extrabold {def.isZero ? 'bg-rose-200 text-rose-900 dark:bg-rose-900/80 dark:text-rose-200' : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'}">
+                                                {def.avail} pcs
+                                            </span>
+                                        </td>
+                                        <td class="p-3 text-center">
+                                            <input
+                                                type="number"
+                                                min="1"
+                                                bind:value={formItems[def.index].qty}
+                                                class="w-16 text-center rounded-xl border border-rose-300 dark:border-rose-700 bg-white dark:bg-slate-900 py-1 text-xs font-extrabold text-rose-600 dark:text-rose-400 focus:ring-2 focus:ring-rose-500"
+                                                title="Ubah Qty Keluar jika diperlukan"
+                                            />
+                                        </td>
+                                        <td class="p-3 text-center">
+                                            {#if def.isZero}
+                                                <span class="text-[11px] font-extrabold text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/60 px-2 py-0.5 rounded-full border border-rose-200 dark:border-rose-800/60">
+                                                    Stok 0 (Kosong)
+                                                </span>
+                                            {:else}
+                                                <span class="text-[11px] font-extrabold text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/60 px-2 py-0.5 rounded-full border border-amber-200 dark:border-amber-800/60">
+                                                    Kurang {def.diff} pcs
+                                                </span>
+                                            {/if}
+                                        </td>
+                                        <td class="p-3 text-right">
+                                            <div class="flex items-center justify-end gap-1.5">
+                                                <div class="relative w-20">
+                                                    <input
+                                                        type="number"
+                                                        min="1"
+                                                        placeholder="Qty"
+                                                        value={adjustInputMap[def.item.product_variant_id!] ?? (def.diff > 0 ? def.diff : def.qtyOut)}
+                                                        oninput={(e) => {
+                                                            adjustInputMap[def.item.product_variant_id!] = Number((e.target as HTMLInputElement).value);
+                                                        }}
+                                                        class="w-full text-center rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 py-1 text-xs font-bold text-slate-800 dark:text-slate-100"
+                                                    />
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    disabled={adjustingVariantId === def.item.product_variant_id || !warehouseId}
+                                                    onclick={() => {
+                                                        const addQty = adjustInputMap[def.item.product_variant_id!] ?? (def.diff > 0 ? def.diff : def.qtyOut);
+                                                        handleQuickAdjustSingle(def.item.product_variant_id!, addQty, def.index);
+                                                    }}
+                                                    class="px-2.5 py-1 text-xs font-bold rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white flex items-center gap-1 transition-all shadow-xs shrink-0"
+                                                    title="Tambah stok ke gudang asal sekarang"
+                                                >
+                                                    {#if adjustingVariantId === def.item.product_variant_id}
+                                                        <RefreshCw class="w-3.5 h-3.5 animate-spin" />
+                                                    {:else}
+                                                        <Plus class="w-3.5 h-3.5" />
+                                                        <span>Tambah Stok</span>
+                                                    {/if}
+                                                </button>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                {/if}
                             {/each}
                         </tbody>
                     </table>
