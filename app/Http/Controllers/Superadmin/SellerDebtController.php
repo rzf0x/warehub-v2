@@ -8,6 +8,7 @@ use App\Models\Seller;
 use App\Models\SellerDebtAdjustment;
 use App\Models\StockInItem;
 use App\Models\StockOutItem;
+use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Inertia\Inertia;
@@ -79,10 +80,19 @@ class SellerDebtController extends Controller
     public function show(Seller $seller, Request $request)
     {
         $periodId = $request->input('period_id');
+        $search = $request->input('search');
 
         $stockInItems = StockInItem::with(['stockIn.warehouse', 'productVariant.product'])
             ->whereHas('productVariant.product', fn($q) => $q->where('seller_id', $seller->id))
             ->when($periodId, fn($q) => $q->whereHas('stockIn', fn($sq) => $sq->where('period_id', $periodId)))
+            ->when($search, function ($q) use ($search) {
+                $q->where(function ($sub) use ($search) {
+                    $sub->whereHas('productVariant', function ($vq) use ($search) {
+                        $vq->where('sku', 'like', "%{$search}%")
+                            ->orWhereHas('product', fn($pq) => $pq->where('product_name', 'like', "%{$search}%"));
+                    })->orWhereHas('stockIn', fn($siq) => $siq->where('invoice_number', 'like', "%{$search}%"));
+                });
+            })
             ->latest()
             ->paginate(10, ['*'], 'stock_in_page')
             ->withQueryString();
@@ -90,6 +100,14 @@ class SellerDebtController extends Controller
         $stockOutItems = StockOutItem::with(['stockOut.store', 'productVariant.product'])
             ->whereHas('productVariant.product', fn($q) => $q->where('seller_id', $seller->id))
             ->when($periodId, fn($q) => $q->whereHas('stockOut', fn($sq) => $sq->where('period_id', $periodId)))
+            ->when($search, function ($q) use ($search) {
+                $q->where(function ($sub) use ($search) {
+                    $sub->whereHas('productVariant', function ($vq) use ($search) {
+                        $vq->where('sku', 'like', "%{$search}%")
+                            ->orWhereHas('product', fn($pq) => $pq->where('product_name', 'like', "%{$search}%"));
+                    })->orWhereHas('stockOut.store', fn($stq) => $stq->where('store_name', 'like', "%{$search}%"));
+                });
+            })
             ->latest()
             ->paginate(10, ['*'], 'stock_out_page')
             ->withQueryString();
@@ -108,8 +126,20 @@ class SellerDebtController extends Controller
             ->when($periodId, fn($q) => $q->whereHas('stockOut', fn($sq) => $sq->where('period_id', $periodId)))
             ->sum(DB::raw('qty * price'));
 
+        $stockInQty = (int) StockInItem::whereHas('productVariant.product', fn($q) => $q->where('seller_id', $seller->id))
+            ->when($periodId, fn($q) => $q->whereHas('stockIn', fn($sq) => $sq->where('period_id', $periodId)))
+            ->sum('qty');
+
+        $stockOutQty = (int) StockOutItem::whereHas('productVariant.product', fn($q) => $q->where('seller_id', $seller->id))
+            ->when($periodId, fn($q) => $q->whereHas('stockOut', fn($sq) => $sq->where('period_id', $periodId)))
+            ->sum('qty');
+
         $totalAdjustment = (float) $adjustments->sum('amount');
         $netDebt = $stockInHpp - $stockOutHpp + $totalAdjustment;
+        $liquidationRate = $stockInHpp > 0 ? round(($stockOutHpp / $stockInHpp) * 100, 1) : 0;
+
+        $seller->load('brand:id,name');
+        $seller->loadCount(['products', 'stores']);
 
         return Inertia::render('Superadmin/Finance/SellerDebt/Show', [
             'seller' => $seller,
@@ -122,11 +152,74 @@ class SellerDebtController extends Controller
                 'stock_out_hpp' => $stockOutHpp,
                 'total_adjustment' => $totalAdjustment,
                 'net_debt' => $netDebt,
+                'stock_in_qty' => $stockInQty,
+                'stock_out_qty' => $stockOutQty,
+                'liquidation_rate' => $liquidationRate,
+                'active_products_count' => $seller->products_count,
+                'stores_count' => $seller->stores_count,
             ],
             'filters' => [
                 'period_id' => $periodId,
+                'search' => $search,
             ],
         ]);
+    }
+
+    public function exportPdf(Seller $seller, Request $request)
+    {
+        $periodId = $request->input('period_id');
+        $selectedPeriod = $periodId ? Period::find($periodId) : null;
+
+        $stockInItems = StockInItem::with(['stockIn.warehouse', 'productVariant.product'])
+            ->whereHas('productVariant.product', fn($q) => $q->where('seller_id', $seller->id))
+            ->when($periodId, fn($q) => $q->whereHas('stockIn', fn($sq) => $sq->where('period_id', $periodId)))
+            ->latest()
+            ->get();
+
+        $stockOutItems = StockOutItem::with(['stockOut.store', 'productVariant.product'])
+            ->whereHas('productVariant.product', fn($q) => $q->where('seller_id', $seller->id))
+            ->when($periodId, fn($q) => $q->whereHas('stockOut', fn($sq) => $sq->where('period_id', $periodId)))
+            ->latest()
+            ->get();
+
+        $adjustments = SellerDebtAdjustment::with('period')
+            ->where('seller_id', $seller->id)
+            ->when($periodId, fn($q) => $q->where('period_id', $periodId))
+            ->latest()
+            ->get();
+
+        $stockInHpp = (float) $stockInItems->sum(fn($it) => $it->qty * $it->price);
+        $stockOutHpp = (float) $stockOutItems->sum(fn($it) => $it->qty * $it->price);
+        $totalAdjustment = (float) $adjustments->sum('amount');
+        $netDebt = $stockInHpp - $stockOutHpp + $totalAdjustment;
+
+        $stockInQty = (int) $stockInItems->sum('qty');
+        $stockOutQty = (int) $stockOutItems->sum('qty');
+        $liquidationRate = $stockInHpp > 0 ? round(($stockOutHpp / $stockInHpp) * 100, 1) : 0;
+
+        $seller->load('brand:id,name');
+
+        $stats = [
+            'stock_in_hpp' => $stockInHpp,
+            'stock_out_hpp' => $stockOutHpp,
+            'total_adjustment' => $totalAdjustment,
+            'net_debt' => $netDebt,
+            'stock_in_qty' => $stockInQty,
+            'stock_out_qty' => $stockOutQty,
+            'liquidation_rate' => $liquidationRate,
+        ];
+
+        $pdf = Pdf::loadView('pdf.seller_debt_statement', compact(
+            'seller',
+            'selectedPeriod',
+            'stats',
+            'stockInItems',
+            'stockOutItems',
+            'adjustments'
+        ));
+
+        $filename = 'Rekening_Koran_Modal_' . str_replace(' ', '_', $seller->seller_name) . '.pdf';
+        return $pdf->stream($filename);
     }
 
     public function chart(Request $request)

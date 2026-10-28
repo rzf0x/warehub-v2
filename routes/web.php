@@ -121,6 +121,7 @@ Route::middleware(['auth'])->group(function () {
             Route::post('seller-debt/adjustment', [\App\Http\Controllers\Superadmin\SellerDebtController::class, 'storeAdjustment'])->name('seller-debt.adjustment.store');
             Route::delete('seller-debt/adjustment/{adjustment}', [\App\Http\Controllers\Superadmin\SellerDebtController::class, 'destroyAdjustment'])->name('seller-debt.adjustment.destroy');
             Route::get('seller-debt/{seller}', [\App\Http\Controllers\Superadmin\SellerDebtController::class, 'show'])->name('seller-debt.show');
+            Route::get('seller-debt/{seller}/pdf', [\App\Http\Controllers\Superadmin\SellerDebtController::class, 'exportPdf'])->name('seller-debt.pdf');
 
             // Tagihan Konveksi
             Route::get('konveksi-debt', [\App\Http\Controllers\Superadmin\KonveksiDebtController::class, 'index'])->name('konveksi-debt.index');
