@@ -603,8 +603,8 @@
 
         // Tampilkan modal progress
         isImporting = true;
-        importProgress = 15;
-        importStatusText = `Mengunggah & menganalisis file ${file.name}...`;
+        importProgress = 5;
+        importStatusText = `Membaca file ${file.name}...`;
         missingSkusList = [];
         fileSuggestedPencairan = null;
         fileSuggestedBruto = null;
@@ -612,99 +612,204 @@
         importMatchedCount = 0;
         importMissingCount = 0;
         importTotalChunks = 1;
-        importCurrentChunk = 1;
+        importCurrentChunk = 0;
+        importTotalItems = 0;
 
         try {
-            const formData = new FormData();
-            formData.append("file", file);
-            if (warehouseId) formData.append("warehouse_id", String(warehouseId));
-            formData.append("seller_id", String(sellerId));
-
-            importProgress = 40;
-            importStatusText = "Mencocokkan SKU pesanan dengan Database Master Gudang...";
-
-            const response = await fetch("/superadmin/warehouse/stock-out/process-orders", {
-                method: "POST",
-                headers: {
-                    "X-Requested-With": "XMLHttpRequest",
-                    "X-CSRF-TOKEN": getCsrfHeader(),
-                },
-                body: formData,
-            });
-
-            const resText = await response.text();
-            let resData: any;
+            // 1. Baca isi file secara lokal di browser
+            const fileText = await file.text();
+            let parsedJson: any;
             try {
-                resData = JSON.parse(resText);
-            } catch (parseErr) {
-                console.error("Respon bukan JSON:", resText);
-                if (response.status === 403) {
-                    throw new Error("Akses ditolak (HTTP 403 Forbidden). Firewall server/ModSecurity memblokir request atau akun belum diverifikasi.");
-                }
-                if (response.status === 419) {
-                    throw new Error("Sesi browser kedaluwarsa (419). Silakan refresh halaman.");
-                }
-                throw new Error(`Server mengembalikan status HTTP ${response.status}`);
+                parsedJson = JSON.parse(fileText);
+            } catch (parseErr: any) {
+                throw new Error("File yang diunggah bukan format JSON yang valid: " + parseErr.message);
             }
 
-            if (!resData.success) {
-                alert(resData.message || "Gagal memproses file pesanan.");
-                return;
+            // 2. Ekstrak array pesanan & metadata
+            let allRawItems: any[] = [];
+            if (Array.isArray(parsedJson)) {
+                allRawItems = parsedJson;
+            } else if (parsedJson && typeof parsedJson === "object") {
+                if (Array.isArray(parsedJson.data)) {
+                    allRawItems = parsedJson.data;
+                } else if (Array.isArray(parsedJson.orders)) {
+                    allRawItems = parsedJson.orders;
+                } else if (Array.isArray(parsedJson.items)) {
+                    allRawItems = parsedJson.items;
+                } else if (Array.isArray(parsedJson.rows)) {
+                    allRawItems = parsedJson.rows;
+                }
+
+                if (parsedJson.bruto !== undefined && parsedJson.bruto !== null) {
+                    bruto = Number(parsedJson.bruto);
+                    fileSuggestedBruto = Number(parsedJson.bruto);
+                }
+                const suggestedPencairan =
+                    parsedJson.total_pembayaran_kalkulasi ??
+                    parsedJson.matched_master_amount ??
+                    parsedJson.total_master_amount ??
+                    parsedJson.total_payment ??
+                    null;
+                if (suggestedPencairan !== null && suggestedPencairan !== undefined) {
+                    fileSuggestedPencairan = Number(suggestedPencairan);
+                }
+                const expectedQty =
+                    parsedJson.total_qty_satuan ??
+                    parsedJson.total_qty_product_ditemukan ??
+                    null;
+                if (expectedQty !== null && expectedQty !== undefined) {
+                    fileExpectedQty = Number(expectedQty);
+                }
             }
 
-            importProgress = 85;
-            importStatusText = "Menyusun rincian item barang keluar...";
+            if (allRawItems.length === 0) {
+                throw new Error("Data pesanan kosong atau file JSON tidak memiliki array data/orders/items.");
+            }
 
-            const resolvedMatchedItems: FormItem[] = [];
-            if (Array.isArray(resData.matched_items)) {
-                resData.matched_items.forEach((m: any) => {
-                    resolvedMatchedItems.push({
-                        product_variant_id: m.product_variant_id,
-                        konveksi_id: null,
-                        seller_id: m.seller_id || Number(sellerId),
-                        seller_name: m.seller_name || (sellers.find((s) => s.id === Number(sellerId))?.seller_name ?? "Mitra"),
-                        sku: m.sku,
-                        product_name: m.product_name,
-                        size: m.size,
-                        color: m.color,
-                        qty: m.qty,
-                        price: Number(m.price || 0),
-                        selling_price: Number(Number(m.selling_price || 0).toFixed(2)),
-                        available_stock: m.available_stock,
-                        is_bundle: m.is_bundle ?? false,
-                        bundle_components: m.bundle_components ?? [],
-                    });
+            importTotalItems = allRawItems.length;
+
+            // 3. Chunking: potong per batch (60 baris) agar payload tiap request sangat ringan (~15-20 KB)
+            // Ini menjamin request tidak akan pernah terblokir ModSecurity / WAF hosting (403 Forbidden)
+            const CHUNK_SIZE = 60;
+            const totalChunks = Math.ceil(allRawItems.length / CHUNK_SIZE);
+            importTotalChunks = totalChunks;
+
+            const accumulatedMatchedItems: FormItem[] = [];
+            const missingMap = new Map<string, any>();
+            const resiMap = new Map<string, any>();
+
+            for (let c = 0; c < totalChunks; c++) {
+                importCurrentChunk = c + 1;
+                const chunkStart = c * CHUNK_SIZE;
+                const chunkEnd = Math.min(chunkStart + CHUNK_SIZE, allRawItems.length);
+                const chunkItems = allRawItems.slice(chunkStart, chunkEnd);
+
+                importProgress = Math.round((c / totalChunks) * 85) + 5;
+                importStatusText = `Mengirim batch ${c + 1} dari ${totalChunks} (${chunkItems.length} pesanan)...`;
+
+                const response = await fetch("/superadmin/warehouse/stock-out/import-chunked", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                        "X-Requested-With": "XMLHttpRequest",
+                        "X-CSRF-TOKEN": getCsrfHeader(),
+                    },
+                    body: JSON.stringify({
+                        items: chunkItems,
+                        warehouse_id: Number(warehouseId),
+                        seller_id: Number(sellerId),
+                    }),
                 });
+
+                const resText = await response.text();
+                let resData: any;
+                try {
+                    resData = JSON.parse(resText);
+                } catch (parseErr) {
+                    console.error("Respon bukan JSON:", resText);
+                    if (response.status === 403) {
+                        throw new Error("Akses ditolak (HTTP 403 Forbidden). Firewall server/ModSecurity memblokir request.");
+                    }
+                    if (response.status === 419) {
+                        throw new Error("Sesi browser kedaluwarsa (419). Silakan refresh halaman.");
+                    }
+                    throw new Error(`Server mengembalikan status HTTP ${response.status}`);
+                }
+
+                if (!resData.success) {
+                    throw new Error(resData.message || `Gagal memproses batch ke-${c + 1}`);
+                }
+
+                // Akumulasi Matched Items
+                if (Array.isArray(resData.matched_items)) {
+                    resData.matched_items.forEach((m: any) => {
+                        accumulatedMatchedItems.push({
+                            product_variant_id: m.product_variant_id,
+                            konveksi_id: null,
+                            seller_id: m.seller_id || Number(sellerId),
+                            seller_name: m.seller_name || (sellers.find((s) => s.id === Number(sellerId))?.seller_name ?? "Mitra"),
+                            sku: m.sku,
+                            product_name: m.product_name,
+                            size: m.size,
+                            color: m.color,
+                            qty: m.qty,
+                            price: Number(m.price || 0),
+                            selling_price: Number(Number(m.selling_price || 0).toFixed(2)),
+                            available_stock: m.available_stock,
+                            is_bundle: m.is_bundle ?? false,
+                            bundle_components: m.bundle_components ?? [],
+                        });
+                    });
+                }
+
+                // Akumulasi Missing SKUs
+                if (Array.isArray(resData.missing_skus)) {
+                    resData.missing_skus.forEach((m: any) => {
+                        const key = (m.sku || "").toUpperCase();
+                        if (!missingMap.has(key)) {
+                            missingMap.set(key, { ...m });
+                        } else {
+                            const existing = missingMap.get(key);
+                            existing.total_qty = (existing.total_qty || 0) + (m.total_qty || 0);
+                            existing.total_payment = Number(((existing.total_payment || 0) + (m.total_payment || 0)).toFixed(2));
+                            existing.order_count = (existing.order_count || 0) + (m.order_count || 0);
+                            if (Array.isArray(m.orders)) {
+                                existing.orders = Array.from(new Set([...(existing.orders || []), ...m.orders]));
+                            }
+                            if (Array.isArray(m.variations)) {
+                                existing.variations = Array.from(new Set([...(existing.variations || []), ...m.variations]));
+                                existing.variation = existing.variations.join(", ");
+                            }
+                            if (Array.isArray(m.sizes)) {
+                                existing.sizes = Array.from(new Set([...(existing.sizes || []), ...m.sizes]));
+                                existing.sizes_count = existing.sizes.length;
+                                existing.has_multiple_sizes = existing.sizes.length > 1;
+                            }
+                            if (Array.isArray(m.missing_parts)) {
+                                existing.missing_parts = Array.from(new Set([...(existing.missing_parts || []), ...m.missing_parts]));
+                            }
+                        }
+                    });
+                }
+
+                // Akumulasi Resi
+                if (Array.isArray(resData.resis)) {
+                    resData.resis.forEach((r: any) => {
+                        const rKey = (r.order_id || r.no_resi || "").trim();
+                        if (!rKey) return;
+                        if (!resiMap.has(rKey)) {
+                            resiMap.set(rKey, {
+                                order_id: r.order_id,
+                                no_resi: r.no_resi,
+                                payment: Number(r.payment || 0),
+                            });
+                        } else {
+                            const existing = resiMap.get(rKey);
+                            existing.payment = Number(((existing.payment || 0) + (r.payment || 0)).toFixed(2));
+                            if (r.no_resi && !existing.no_resi) {
+                                existing.no_resi = r.no_resi;
+                            }
+                        }
+                    });
+                }
+
+                importMatchedCount = accumulatedMatchedItems.length;
+                importMissingCount = missingMap.size;
             }
 
-            if (Array.isArray(resData.missing_skus)) {
-                missingSkusList = resData.missing_skus;
-                importMissingCount = resData.missing_skus.length;
-            }
+            // 4. Selesai semua chunk, konsolidasikan item
+            importProgress = 95;
+            importStatusText = "Menyusun dan mengonsolidasikan item barang keluar...";
 
-            if (Array.isArray(resData.resis)) {
-                resiList = resData.resis.map((r: any) => ({
-                    order_id: r.order_id,
-                    no_resi: r.no_resi,
-                    payment: r.payment,
-                }));
-            }
+            formItems = consolidateFormItems(accumulatedMatchedItems);
+            missingSkusList = Array.from(missingMap.values());
+            resiList = Array.from(resiMap.values());
 
-            if (resData.suggested_bruto) {
-                bruto = Number(resData.suggested_bruto);
-                fileSuggestedBruto = Number(resData.suggested_bruto);
-            }
-            if (resData.suggested_pencairan) {
-                fileSuggestedPencairan = Number(resData.suggested_pencairan);
-            }
-            if (resData.expected_file_qty) {
-                fileExpectedQty = Number(resData.expected_file_qty);
-            }
-
-            formItems = consolidateFormItems(resolvedMatchedItems);
             importMatchedCount = formItems.length;
+            importMissingCount = missingSkusList.length;
             importProgress = 100;
-            importStatusText = `Selesai! Berhasil mencocokkan ${formItems.length} produk varian.`;
+            importStatusText = `Selesai! Berhasil memproses ${importTotalItems} pesanan (${formItems.length} produk varian).`;
 
             setTimeout(() => {
                 isImporting = false;
