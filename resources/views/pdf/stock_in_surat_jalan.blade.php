@@ -45,28 +45,48 @@
         <thead>
             <tr>
                 <th style="width: 5%;">No</th>
-                <th style="width: 30%;">Produk & SKU</th>
+                <th style="width: 15%;">Seller</th>
+                <th style="width: 25%;">Produk & SKU</th>
                 <th style="width: 15%;">Vendor Konveksi</th>
-                <th style="width: 15%;">Ukuran / Warna</th>
-                <th style="width: 15%;">HPP (Rp)</th>
-                <th style="width: 20%;">Qty Masuk</th>
+                <th style="width: 12%;">Ukuran / Warna</th>
+                <th style="width: 8%;">Qty</th>
+                <th style="width: 10%;">HPP / Pcs</th>
+                <th style="width: 10%;">Subtotal</th>
             </tr>
         </thead>
         <tbody>
+            @php
+                $grandQty = 0;
+                $grandNominal = 0;
+            @endphp
             @foreach($stockIn->items as $index => $item)
+            @php
+                $subtotal = $item->qty * $item->price;
+                $grandQty += $item->qty;
+                $grandNominal += $subtotal;
+            @endphp
             <tr>
                 <td>{{ $index + 1 }}</td>
+                <td>{{ $item->productVariant->product->seller->seller_name ?? 'Umum' }}</td>
                 <td>
                     <strong>{{ $item->productVariant->product->product_name ?? '-' }}</strong><br>
                     <small style="color: #6366f1;">SKU: {{ $item->productVariant->sku ?? '-' }}</small>
                 </td>
-                <td>{{ $item->konveksi->name ?? '-' }}</td>
+                <td>{{ $item->konveksi->name ?? 'Internal' }}</td>
                 <td>{{ $item->productVariant->size ?? '-' }} / {{ $item->productVariant->color ?? '-' }}</td>
+                <td><strong>{{ number_format($item->qty, 0, ',', '.') }} pcs</strong></td>
                 <td>Rp {{ number_format($item->price, 0, ',', '.') }}</td>
-                <td><strong>{{ $item->qty }} pcs</strong></td>
+                <td><strong>Rp {{ number_format($subtotal, 0, ',', '.') }}</strong></td>
             </tr>
             @endforeach
         </tbody>
+        <tfoot>
+            <tr>
+                <td colspan="5" style="text-align: right; font-weight: bold;">TOTAL KESELURUHAN</td>
+                <td><strong>{{ number_format($grandQty, 0, ',', '.') }} pcs</strong></td>
+                <td colspan="2" style="text-align: right;"><strong>Rp {{ number_format($grandNominal, 0, ',', '.') }}</strong></td>
+            </tr>
+        </tfoot>
     </table>
 
     <div class="footer">

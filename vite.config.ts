@@ -18,7 +18,7 @@ export default defineConfig({
     plugins: lazyPlugins(() => [
         laravel({
             input: ['resources/css/app.css', 'resources/js/app.ts'],
-            refresh: true,
+            refresh: ['resources/views/**', 'routes/**'],
             fonts: [
                 bunny('Instrument Sans', {
                     weights: [400, 500, 600],
@@ -40,6 +40,8 @@ export default defineConfig({
                 '**/.cursor/**',
                 '**/.junie/**',
                 '**/vendor/**',
+                '**/storage/**',
+                '**/*.tmp',
             ],
         },
     },

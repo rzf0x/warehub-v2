@@ -87,7 +87,7 @@ Route::middleware(['auth'])->group(function () {
             Route::get('stock-in/search-variants', [StockInController::class, 'searchVariants'])->name('stock-in.search-variants');
             Route::get('stock-in/report/pdf', [StockInController::class, 'exportReport'])->name('stock-in.report.pdf');
             Route::get('stock-in/{stockIn}/pdf', [StockInController::class, 'streamSuratJalan'])->name('stock-in.pdf');
-            Route::resource('stock-in', StockInController::class)->except(['edit', 'update', 'show']);
+            Route::resource('stock-in', StockInController::class)->except(['show']);
 
             // Stock Out
             Route::get('stock-out/summary/pdf', [StockOutController::class, 'exportSummary'])->name('stock-out.summary.pdf');
