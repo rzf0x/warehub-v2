@@ -174,6 +174,7 @@ class StockController extends Controller
                     'pv.sku as variant_sku',
                     'pv.size',
                     'pv.color',
+                    'pv.price as hpp_price',
                     DB::raw('COALESCE(st_sum.total_qty, 0) as variant_qty'),
                 ])
                 ->orderBy('p.product_name')
@@ -192,6 +193,7 @@ class StockController extends Controller
                         'brand_name' => (string) ($row->brand_name ?: '-'),
                         'category_name' => (string) ($row->category_name ?: '-'),
                         'total_qty' => 0,
+                        'total_debt' => 0.0,
                         'variants_count' => 0,
                         'variants' => [],
                     ];
@@ -199,14 +201,20 @@ class StockController extends Controller
 
                 if ($row->variant_id !== null) {
                     $qty = (int) $row->variant_qty;
+                    $hpp = (float) ($row->hpp_price ?? 0);
+                    $variantDebt = $qty * $hpp;
+
                     $grouped[$pid]['variants'][] = [
                         'id' => (int) $row->variant_id,
                         'sku' => (string) $row->variant_sku,
                         'size' => (string) ($row->size ?: '-'),
                         'color' => (string) ($row->color ?: '-'),
+                        'hpp_price' => $hpp,
                         'qty' => $qty,
+                        'total_debt' => $variantDebt,
                     ];
                     $grouped[$pid]['total_qty'] += $qty;
+                    $grouped[$pid]['total_debt'] += $variantDebt;
                     $grouped[$pid]['variants_count']++;
                 }
             }
@@ -284,6 +292,7 @@ class StockController extends Controller
                 'pv.sku as variant_sku',
                 'pv.size',
                 'pv.color',
+                'pv.price as hpp_price',
                 DB::raw('COALESCE(st_sum.total_qty, 0) as variant_qty'),
             ])
             ->orderBy('p.product_name')
@@ -293,6 +302,7 @@ class StockController extends Controller
         $grouped = [];
         $totalVariantsCount = 0;
         $grandTotalQty = 0;
+        $grandTotalDebt = 0.0;
 
         foreach ($rows as $row) {
             $pid = (int) $row->product_id;
@@ -304,21 +314,29 @@ class StockController extends Controller
                     'product_type' => (string) ($row->product_type ?: 'single'),
                     'category_name' => (string) ($row->category_name ?: '-'),
                     'total_qty' => 0,
+                    'total_debt' => 0.0,
                     'variants' => [],
                 ];
             }
 
             $qty = (int) $row->variant_qty;
+            $hpp = (float) ($row->hpp_price ?? 0);
+            $variantDebt = $qty * $hpp;
+
             $grouped[$pid]['variants'][] = [
                 'id' => (int) $row->variant_id,
                 'sku' => (string) $row->variant_sku,
                 'size' => (string) ($row->size ?: '-'),
                 'color' => (string) ($row->color ?: '-'),
+                'hpp_price' => $hpp,
                 'qty' => $qty,
+                'total_debt' => $variantDebt,
             ];
             $grouped[$pid]['total_qty'] += $qty;
+            $grouped[$pid]['total_debt'] += $variantDebt;
             $totalVariantsCount++;
             $grandTotalQty += $qty;
+            $grandTotalDebt += $variantDebt;
         }
 
         $productsData = array_values($grouped);
@@ -335,6 +353,7 @@ class StockController extends Controller
                 'total_products' => $totalProductsCount,
                 'total_variants' => $totalVariantsCount,
                 'grand_total_qty' => $grandTotalQty,
+                'grand_total_debt' => $grandTotalDebt,
             ],
         ])->setPaper('a4', 'portrait');
 

@@ -40,7 +40,9 @@
         sku: string;
         size: string;
         color: string;
+        hpp_price: number;
         qty: number;
+        total_debt: number;
     }
 
     interface ProductItem {
@@ -51,6 +53,7 @@
         brand_name: string;
         category_name: string;
         total_qty: number;
+        total_debt: number;
         variants_count: number;
         variants: VariantItem[];
     }
@@ -109,6 +112,15 @@
         currentPage = 1;
     });
 
+    function formatRupiah(num: number): string {
+        return new Intl.NumberFormat('id-ID', {
+            style: 'currency',
+            currency: 'IDR',
+            minimumFractionDigits: 0,
+            maximumFractionDigits: 0,
+        }).format(num || 0);
+    }
+
     const filteredSellers = $derived(
         sellers.filter(
             (s) =>
@@ -155,15 +167,18 @@
             category_name: string;
             variants: VariantItem[];
             total_qty: number;
+            total_debt: number;
         }> = [];
 
         let totalVariants = 0;
         let grandTotalQty = 0;
+        let grandTotalDebt = 0;
 
         for (const p of products) {
             const chosenVariants = p.variants.filter((v) => selectedVariantIds[v.id]);
             if (chosenVariants.length > 0) {
                 const subQty = chosenVariants.reduce((acc, v) => acc + v.qty, 0);
+                const subDebt = chosenVariants.reduce((acc, v) => acc + (v.total_debt ?? v.qty * (v.hpp_price ?? 0)), 0);
                 chosenProducts.push({
                     id: p.id,
                     product_name: p.product_name,
@@ -171,9 +186,11 @@
                     category_name: p.category_name,
                     variants: chosenVariants,
                     total_qty: subQty,
+                    total_debt: subDebt,
                 });
                 totalVariants += chosenVariants.length;
                 grandTotalQty += subQty;
+                grandTotalDebt += subDebt;
             }
         }
 
@@ -182,6 +199,7 @@
             total_products: chosenProducts.length,
             total_variants: totalVariants,
             grand_total_qty: grandTotalQty,
+            grand_total_debt: grandTotalDebt,
         };
     });
 
@@ -324,7 +342,7 @@
                     Print SKU Stock Per-Seller
                 </h1>
                 <p class="text-sm text-slate-500 dark:text-slate-400">
-                    Pilih seller mitra, centang produk/SKU yang ingin dicetak, lihat rekap SKU &amp; Size beserta total stoknya, lalu download sebagai PDF
+                    Pilih seller mitra, centang produk/SKU yang ingin dicetak, lihat rekap SKU, Size, Total Qty &amp; Total Hutang (Qty &times; HPP), lalu download PDF
                 </p>
             </div>
         </div>
@@ -532,8 +550,9 @@
                     <div class="text-xs text-slate-500 dark:text-slate-400">
                         Terpilih:
                         <strong class="text-slate-800 dark:text-slate-100">{selectedProductsSummary.total_products} Produk</strong>
-                        ({selectedProductsSummary.total_variants} SKU Varian •
-                        <strong class="text-emerald-600 dark:text-emerald-400">{selectedProductsSummary.grand_total_qty.toLocaleString('id-ID')} Pcs</strong>)
+                        ({selectedProductsSummary.total_variants} SKU •
+                        <strong class="text-emerald-600 dark:text-emerald-400">{selectedProductsSummary.grand_total_qty.toLocaleString('id-ID')} Pcs</strong> •
+                        Hutang: <strong class="text-rose-600 dark:text-rose-400">{formatRupiah(selectedProductsSummary.grand_total_debt)}</strong>)
                     </div>
 
                     <button
@@ -602,11 +621,18 @@
                                     </div>
                                 </div>
 
-                                <div class="flex items-center justify-between sm:justify-end gap-3 pt-2 sm:pt-0 border-t sm:border-t-0 border-slate-100 dark:border-slate-800">
+                                <div class="flex items-center justify-between sm:justify-end gap-4 pt-2 sm:pt-0 border-t sm:border-t-0 border-slate-100 dark:border-slate-800">
                                     <div class="text-right">
-                                        <span class="block text-[10px] uppercase font-semibold tracking-wider text-slate-400">Total Stok Produk</span>
+                                        <span class="block text-[10px] uppercase font-semibold tracking-wider text-slate-400">Total Stok</span>
                                         <span class="text-sm font-extrabold {product.total_qty > 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-500'}">
                                             {product.total_qty.toLocaleString('id-ID')} Pcs
+                                        </span>
+                                    </div>
+
+                                    <div class="text-right">
+                                        <span class="block text-[10px] uppercase font-semibold tracking-wider text-slate-400">Total Hutang SKU</span>
+                                        <span class="text-sm font-extrabold {product.total_debt > 0 ? 'text-rose-600 dark:text-rose-400' : 'text-slate-600 dark:text-slate-300'}">
+                                            {formatRupiah(product.total_debt)}
                                         </span>
                                     </div>
 
@@ -636,7 +662,9 @@
                                                 <th class="px-4 py-2.5">Kode SKU Varian</th>
                                                 <th class="px-4 py-2.5 text-center">Size / Ukuran</th>
                                                 <th class="px-4 py-2.5 text-center">Warna</th>
+                                                <th class="px-4 py-2.5 text-right">HPP Size</th>
                                                 <th class="px-4 py-2.5 text-right">Total Qty Stok</th>
+                                                <th class="px-4 py-2.5 text-right">Total Hutang (Qty &times; HPP)</th>
                                             </tr>
                                         </thead>
                                         <tbody class="divide-y divide-slate-100 dark:divide-slate-800">
@@ -666,8 +694,14 @@
                                                     <td class="px-4 py-2.5 text-center">
                                                         {v.color}
                                                     </td>
+                                                    <td class="px-4 py-2.5 text-right font-medium text-slate-700 dark:text-slate-300">
+                                                        {formatRupiah(v.hpp_price)}
+                                                    </td>
                                                     <td class="px-4 py-2.5 text-right font-extrabold {v.qty <= 0 ? 'text-rose-500' : v.qty <= 5 ? 'text-amber-600' : 'text-emerald-600 dark:text-emerald-400'}">
                                                         {v.qty.toLocaleString('id-ID')} pcs
+                                                    </td>
+                                                    <td class="px-4 py-2.5 text-right font-extrabold {v.total_debt > 0 ? 'text-rose-600 dark:text-rose-400' : 'text-slate-500'}">
+                                                        {formatRupiah(v.total_debt)}
                                                     </td>
                                                 </tr>
                                             {/each}
@@ -726,13 +760,13 @@
     <!-- MODAL PREVIEW & DOWNLOAD PDF -->
     <Modal
         show={showPreviewModal}
-        title="Rekap Print SKU Stock (List SKU, Size & Total Qty)"
-        maxWidth="4xl"
+        title="Rekap Print SKU Stock (List SKU, Size, Total Qty & Total Hutang)"
+        maxWidth="5xl"
         onclose={() => (showPreviewModal = false)}
     >
         <div class="space-y-5">
             <!-- Header Info in Modal -->
-            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 p-4 border border-slate-100 dark:border-slate-800">
+            <div class="grid grid-cols-1 sm:grid-cols-4 gap-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 p-4 border border-slate-100 dark:border-slate-800">
                 <div>
                     <span class="text-[11px] font-semibold uppercase text-slate-400">Seller / Mitra</span>
                     <p class="text-sm font-bold text-slate-800 dark:text-slate-100 mt-0.5">
@@ -746,9 +780,15 @@
                     </p>
                 </div>
                 <div>
-                    <span class="text-[11px] font-semibold uppercase text-slate-400">Total Keseluruhan</span>
+                    <span class="text-[11px] font-semibold uppercase text-slate-400">Total Qty Terpilih</span>
                     <p class="text-sm font-extrabold text-emerald-600 dark:text-emerald-400 mt-0.5">
                         {selectedProductsSummary.total_products} Produk • {selectedProductsSummary.total_variants} SKU • {selectedProductsSummary.grand_total_qty.toLocaleString('id-ID')} Pcs
+                    </p>
+                </div>
+                <div>
+                    <span class="text-[11px] font-semibold uppercase text-rose-500">Grand Total Hutang</span>
+                    <p class="text-sm font-extrabold text-rose-600 dark:text-rose-400 mt-0.5">
+                        {formatRupiah(selectedProductsSummary.grand_total_debt)}
                     </p>
                 </div>
             </div>
@@ -757,7 +797,7 @@
             <div class="max-h-[55vh] overflow-y-auto space-y-4 pr-1">
                 {#each selectedProductsSummary.products as prod, pIdx (prod.id)}
                     <div class="rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
-                        <div class="bg-slate-100 dark:bg-slate-800 px-4 py-2.5 flex items-center justify-between">
+                        <div class="bg-slate-100 dark:bg-slate-800 px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
                             <div>
                                 <span class="text-xs font-bold text-slate-800 dark:text-slate-100">
                                     {pIdx + 1}. {prod.product_name}
@@ -766,9 +806,14 @@
                                     ({prod.sku})
                                 </span>
                             </div>
-                            <span class="text-xs font-extrabold text-emerald-600 dark:text-emerald-400">
-                                Subtotal: {prod.total_qty.toLocaleString('id-ID')} Pcs
-                            </span>
+                            <div class="flex items-center gap-4 text-xs font-extrabold">
+                                <span class="text-emerald-600 dark:text-emerald-400">
+                                    Subtotal Qty: {prod.total_qty.toLocaleString('id-ID')} Pcs
+                                </span>
+                                <span class="text-rose-600 dark:text-rose-400">
+                                    Total Hutang SKU: {formatRupiah(prod.total_debt)}
+                                </span>
+                            </div>
                         </div>
 
                         <table class="w-full text-left text-xs text-slate-600 dark:text-slate-300">
@@ -778,7 +823,9 @@
                                     <th class="px-4 py-2">Kode SKU</th>
                                     <th class="px-4 py-2 text-center">Size</th>
                                     <th class="px-4 py-2 text-center">Warna</th>
+                                    <th class="px-4 py-2 text-right">HPP Size</th>
                                     <th class="px-4 py-2 text-right">Total Qty</th>
+                                    <th class="px-4 py-2 text-right">Total Hutang (Qty &times; HPP)</th>
                                 </tr>
                             </thead>
                             <tbody class="divide-y divide-slate-100 dark:divide-slate-800">
@@ -788,25 +835,47 @@
                                         <td class="px-4 py-2 font-mono font-bold text-indigo-600 dark:text-indigo-400">{v.sku}</td>
                                         <td class="px-4 py-2 text-center font-bold text-slate-800 dark:text-slate-100">{v.size}</td>
                                         <td class="px-4 py-2 text-center">{v.color}</td>
+                                        <td class="px-4 py-2 text-right">{formatRupiah(v.hpp_price)}</td>
                                         <td class="px-4 py-2 text-right font-bold {v.qty <= 0 ? 'text-rose-500' : 'text-emerald-600 dark:text-emerald-400'}">
                                             {v.qty.toLocaleString('id-ID')} Pcs
+                                        </td>
+                                        <td class="px-4 py-2 text-right font-bold {v.total_debt > 0 ? 'text-rose-600 dark:text-rose-400' : 'text-slate-500'}">
+                                            {formatRupiah(v.total_debt)}
                                         </td>
                                     </tr>
                                 {/each}
                             </tbody>
+                            <tfoot class="bg-emerald-50/50 dark:bg-emerald-950/30 border-t border-slate-200 dark:border-slate-800 font-bold text-xs">
+                                <tr>
+                                    <td colspan="5" class="px-4 py-2 text-right text-slate-600 dark:text-slate-300">
+                                        Subtotal {prod.product_name} ({prod.variants.length} Size):
+                                    </td>
+                                    <td class="px-4 py-2 text-right text-emerald-700 dark:text-emerald-300">
+                                        {prod.total_qty.toLocaleString('id-ID')} Pcs
+                                    </td>
+                                    <td class="px-4 py-2 text-right text-rose-600 dark:text-rose-400">
+                                        {formatRupiah(prod.total_debt)}
+                                    </td>
+                                </tr>
+                            </tfoot>
                         </table>
                     </div>
                 {/each}
             </div>
 
             <!-- Grand Total Footer Banner -->
-            <div class="rounded-xl bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800 px-4 py-3 flex items-center justify-between">
+            <div class="rounded-xl bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800 px-4 py-3 flex flex-wrap items-center justify-between gap-3">
                 <span class="text-xs font-bold uppercase tracking-wider text-emerald-800 dark:text-emerald-200">
-                    Grand Total ({selectedProductsSummary.total_variants} SKU Terpilih)
+                    Grand Total ({selectedProductsSummary.total_products} Produk / {selectedProductsSummary.total_variants} SKU Size Terpilih)
                 </span>
-                <span class="text-base font-extrabold text-emerald-700 dark:text-emerald-300">
-                    {selectedProductsSummary.grand_total_qty.toLocaleString('id-ID')} Pcs
-                </span>
+                <div class="flex items-center gap-6">
+                    <span class="text-sm font-extrabold text-emerald-700 dark:text-emerald-300">
+                        Total Stok: {selectedProductsSummary.grand_total_qty.toLocaleString('id-ID')} Pcs
+                    </span>
+                    <span class="text-base font-extrabold text-rose-600 dark:text-rose-400">
+                        Total Hutang: {formatRupiah(selectedProductsSummary.grand_total_debt)}
+                    </span>
+                </div>
             </div>
 
             <!-- Modal Actions: Preview PDF in New Tab or Direct Download PDF -->
