@@ -9,10 +9,9 @@
         .header h2 { margin: 0; color: #be123c; text-transform: uppercase; font-size: 18px; }
         .meta-table { width: 100%; margin-bottom: 15px; border-collapse: collapse; }
         .meta-table td { padding: 4px; font-size: 11px; vertical-align: top; }
-        table.data-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-        table.data-table th, table.data-table td { border: 1px solid #cbd5e1; padding: 6px 8px; text-align: left; }
+        table.data-table { width: 100%; border-collapse: collapse; margin-top: 10px; table-layout: fixed; }
+        table.data-table th, table.data-table td { border: 1px solid #cbd5e1; padding: 6px 8px; text-align: left; word-wrap: break-word; }
         table.data-table th { background-color: #be123c; color: #ffffff; font-weight: bold; text-transform: uppercase; font-size: 9px; }
-        tr:nth-child(even) { background-color: #f8fafc; }
         .footer { margin-top: 30px; text-align: right; font-size: 9px; color: #888; }
     </style>
 </head>
@@ -25,7 +24,7 @@
     <table class="meta-table">
         <tr>
             <td style="width: 15%;"><strong>Ref / Resi</strong></td>
-            <td style="width: 35%;">: {{ $stockOut->resi_summary ?? 'OUT-'.$stockOut->id }}</td>
+            <td style="width: 35%;">: OUT-{{ str_pad((string) $stockOut->id, 5, '0', STR_PAD_LEFT) }} ({{ $resiInfo['label'] ?? '-' }}: {{ $resiInfo['preview'] ?? '-' }})</td>
             <td style="width: 15%;"><strong>Gudang Asal</strong></td>
             <td style="width: 35%;">: {{ $stockOut->warehouse->name ?? '-' }}</td>
         </tr>

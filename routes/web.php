@@ -91,6 +91,7 @@ Route::middleware(['auth'])->group(function () {
 
             // Stock Out
             Route::get('stock-out/summary/pdf', [StockOutController::class, 'exportSummary'])->name('stock-out.summary.pdf');
+            Route::get('stock-out/baju-celana', [StockOutController::class, 'bajuCelana'])->name('stock-out.baju-celana');
             Route::get('stock-out/chart', [StockOutController::class, 'chart'])->name('stock-out.chart');
             Route::get('stock-out/settlement', [StockOutController::class, 'settlement'])->name('stock-out.settlement');
             Route::get('stock-out/seller-detail/{seller}', [StockOutController::class, 'sellerDetail'])->name('stock-out.seller-detail');
@@ -108,6 +109,14 @@ Route::middleware(['auth'])->group(function () {
             Route::resource('stock-opname', StockOpnameController::class)->except(['edit', 'update', 'show']);
 
             // Realtime Stocks & Logs
+            Route::get('stocks/print-sku', [StockController::class, 'printSku'])->name('stocks.print-sku');
+            Route::match(['get', 'post'], 'stocks/print-sku/pdf', [StockController::class, 'exportPrintSkuPdf'])->name('stocks.print-sku.pdf');
+            Route::get('stocks/reconciliation', [StockController::class, 'reconciliation'])->name('stocks.reconciliation');
+            Route::get('stocks/reconciliation/export-csv', [StockController::class, 'exportReconciliationCsv'])->name('stocks.reconciliation.export-csv');
+            Route::get('stocks/reconciliation/export-pdf', [StockController::class, 'exportReconciliationPdf'])->name('stocks.reconciliation.export-pdf');
+            Route::get('stocks/reconciliation/template-csv', [StockController::class, 'downloadOpnameTemplateCsv'])->name('stocks.reconciliation.template-csv');
+            Route::post('stocks/reconciliation/reset-zero', [StockController::class, 'resetSellerStockToZero'])->name('stocks.reconciliation.reset-zero');
+            Route::post('stocks/reconciliation/apply-opname', [StockController::class, 'applySellerOpname'])->name('stocks.reconciliation.apply-opname');
             Route::get('stocks/logs', [StockController::class, 'logs'])->name('stocks.logs');
             Route::get('stocks', [StockController::class, 'index'])->name('stocks.index');
         });
@@ -121,6 +130,7 @@ Route::middleware(['auth'])->group(function () {
             Route::post('seller-debt/adjustment', [\App\Http\Controllers\Superadmin\SellerDebtController::class, 'storeAdjustment'])->name('seller-debt.adjustment.store');
             Route::delete('seller-debt/adjustment/{adjustment}', [\App\Http\Controllers\Superadmin\SellerDebtController::class, 'destroyAdjustment'])->name('seller-debt.adjustment.destroy');
             Route::get('seller-debt/{seller}', [\App\Http\Controllers\Superadmin\SellerDebtController::class, 'show'])->name('seller-debt.show');
+            Route::get('seller-debt/{seller}/konveksi', [\App\Http\Controllers\Superadmin\SellerDebtController::class, 'konveksiDetail'])->name('seller-debt.konveksi-detail');
             Route::get('seller-debt/{seller}/pdf', [\App\Http\Controllers\Superadmin\SellerDebtController::class, 'exportPdf'])->name('seller-debt.pdf');
 
             // Tagihan Konveksi

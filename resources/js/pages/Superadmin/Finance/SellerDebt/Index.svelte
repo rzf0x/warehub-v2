@@ -194,7 +194,7 @@
                                     </button>
 
                                     <Link
-                                        href="/superadmin/finance/seller-debt/{item.id}"
+                                        href="/superadmin/finance/seller-debt/{item.uuid || item.id}"
                                         class="rounded-lg p-2 text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-950/50 transition-colors"
                                         title="Lihat Detail Mutasi"
                                     >

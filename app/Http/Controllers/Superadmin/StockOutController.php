@@ -1790,17 +1790,318 @@ class StockOutController extends Controller
 
     public function streamSuratJalan(StockOut $stockOut)
     {
-        $stockOut->load(['warehouse', 'user', 'store', 'items.productVariant.product']);
-        $pdf = Pdf::loadView('pdf.stock_out_surat_jalan', compact('stockOut'));
+        $stockOut->load(['warehouse:id,name', 'user:id,name', 'store:id,store_name', 'items.productVariant.product:id,product_name']);
+        $resiInfo = $this->formatResiSummary($stockOut->resi_summary);
+        $pdf = Pdf::loadView('pdf.stock_out_surat_jalan', compact('stockOut', 'resiInfo'));
 
         return $pdf->stream("Surat_Jalan_StockOut_{$stockOut->id}.pdf");
     }
 
-    public function exportSummary()
+    public function exportSummary(Request $request)
     {
-        $stockOuts = StockOut::with(['warehouse', 'store', 'items'])->get();
-        $pdf = Pdf::loadView('pdf.stock_out_summary', compact('stockOuts'));
+        $search = $request->input('search');
+        $warehouseId = $request->input('warehouse_id');
+        $storeId = $request->input('store_id');
+        $periodId = $request->input('period_id');
+        $userId = $request->input('user_id');
+
+        // Subquery agregasi item yang di-scope hanya ke stock_outs yang cocok dengan filter
+        $filteredIdsQuery = DB::table('stock_outs')
+            ->select('stock_outs.id')
+            ->when($warehouseId, fn($q) => $q->where('stock_outs.warehouse_id', $warehouseId))
+            ->when($storeId, fn($q) => $q->where('stock_outs.store_id', $storeId))
+            ->when($periodId, fn($q) => $q->where('stock_outs.period_id', $periodId))
+            ->when($userId, fn($q) => $q->where('stock_outs.user_id', $userId))
+            ->when($search, function ($query, $s) {
+                $query->where(function ($q) use ($s) {
+                    $q->where('stock_outs.note', 'like', "%{$s}%")
+                        ->orWhere('stock_outs.resi_summary', 'like', "%{$s}%")
+                        ->orWhereExists(function ($sq) use ($s) {
+                            $sq->select(DB::raw(1))
+                                ->from('stores')
+                                ->whereColumn('stores.id', 'stock_outs.store_id')
+                                ->where('stores.store_name', 'like', "%{$s}%");
+                        });
+                });
+            });
+
+        $itemsAggSub = DB::table('stock_out_items')
+            ->selectRaw('stock_out_id, COALESCE(SUM(qty), 0) as total_qty, COALESCE(SUM(qty * price), 0) as calc_hpp')
+            ->whereIn('stock_out_id', $filteredIdsQuery)
+            ->groupBy('stock_out_id');
+
+        // Query ringan tanpa kolom LONGTEXT resi_summary & tanpa hydrasi ribuan Eloquent model
+        $rows = DB::table('stock_outs')
+            ->leftJoin('warehouses', 'warehouses.id', '=', 'stock_outs.warehouse_id')
+            ->leftJoin('stores', 'stores.id', '=', 'stock_outs.store_id')
+            ->leftJoin('sellers', 'sellers.id', '=', 'stores.seller_id')
+            ->leftJoin('periods', 'periods.id', '=', 'stock_outs.period_id')
+            ->leftJoin('users', 'users.id', '=', 'stock_outs.user_id')
+            ->leftJoinSub($itemsAggSub, 'item_agg', function ($join) {
+                $join->on('item_agg.stock_out_id', '=', 'stock_outs.id');
+            })
+            ->whereIn('stock_outs.id', $filteredIdsQuery)
+            ->select([
+                'stock_outs.id',
+                'stock_outs.date',
+                'stock_outs.note',
+                'stock_outs.total_amount',
+                'stock_outs.total_selling_price',
+                'stock_outs.bruto',
+                'warehouses.name as warehouse_name',
+                'stores.store_name',
+                'sellers.seller_name',
+                'periods.name as period_name',
+                'users.name as admin_name',
+                DB::raw('COALESCE(item_agg.total_qty, 0) as total_qty'),
+                DB::raw('CASE WHEN stock_outs.total_amount > 0 THEN stock_outs.total_amount ELSE COALESCE(item_agg.calc_hpp, 0) END as row_hpp'),
+                DB::raw('CASE WHEN stock_outs.bruto > 0 THEN stock_outs.bruto ELSE COALESCE(stock_outs.total_selling_price, 0) END as row_bruto'),
+                DB::raw('COALESCE(stock_outs.total_selling_price, 0) as row_bersih'),
+            ])
+            ->orderByDesc('stock_outs.date')
+            ->orderByDesc('stock_outs.id')
+            ->get();
+
+        $summary = [
+            'total_transactions' => $rows->count(),
+            'total_qty' => (int) $rows->sum('total_qty'),
+            'total_hpp' => (float) $rows->sum('row_hpp'),
+            'total_bruto' => (float) $rows->sum('row_bruto'),
+            'total_bersih' => (float) $rows->sum('row_bersih'),
+            'total_untung' => (float) ($rows->sum('row_bersih') - $rows->sum('row_hpp')),
+        ];
+
+        $filterInfo = [
+            'period' => $periodId ? (Period::where('id', $periodId)->value('name') ?? 'Semua Periode') : 'Semua Periode',
+            'warehouse' => $warehouseId ? (Warehouse::where('id', $warehouseId)->value('name') ?? 'Semua Gudang') : 'Semua Gudang',
+            'store' => $storeId ? (Store::where('id', $storeId)->value('store_name') ?? 'Semua Toko') : 'Semua Toko',
+        ];
+
+        $pdf = Pdf::loadView('pdf.stock_out_summary', compact('rows', 'summary', 'filterInfo'))
+            ->setPaper('a4', 'landscape');
 
         return $pdf->stream('Summary_Pengeluaran_Barang_StockOut.pdf');
+    }
+
+    public function bajuCelana(Request $request)
+    {
+        $periodId = $request->input('period_id');
+        $warehouseId = $request->input('warehouse_id');
+        $storeId = $request->input('store_id');
+        $sellerId = $request->input('seller_id');
+        $search = $request->input('search');
+        $typeFilter = $request->input('type', 'all'); // 'all', 'baju', 'celana', 'other'
+
+        $periods = Period::select('id', 'name', 'start_date', 'end_date')->latest()->get();
+        $warehouses = Warehouse::select('id', 'name')->get();
+        $stores = Store::select('id', 'store_name')->get();
+        $sellers = Seller::select('id', 'seller_name')->orderBy('seller_name')->get();
+
+        // Query stock outs based on filters
+        $stockOutQuery = StockOut::query()
+            ->when($periodId, fn($q) => $q->where('period_id', $periodId))
+            ->when($warehouseId, fn($q) => $q->where('warehouse_id', $warehouseId))
+            ->when($storeId, fn($q) => $q->where('store_id', $storeId));
+
+        if ($sellerId) {
+            $stockOutQuery->where(function ($q) use ($sellerId) {
+                $q->whereHas('store', fn($st) => $st->where('seller_id', $sellerId))
+                  ->orWhereHas('items.productVariant.product', fn($pq) => $pq->where('seller_id', $sellerId));
+            });
+        }
+
+        $stockOutIds = $stockOutQuery->pluck('id');
+
+        // Fetch stock out items within these stock outs with bundle component relationships
+        $items = StockOutItem::whereIn('stock_out_id', $stockOutIds)
+            ->with([
+                'stockOut.store',
+                'stockOut.warehouse',
+                'stockOut.period',
+                'productVariant.product.category',
+                'productVariant.product.seller',
+                'productVariant.bundleAsBundle.componentVariant.product.category',
+                'productVariant.bundleAsBundle.componentVariant.product.seller',
+            ])
+            ->get();
+
+        $bajuCount = 0;
+        $celanaCount = 0;
+        $otherCount = 0;
+        $bundleUnpackedPcs = 0;
+        $totalPcs = 0;
+
+        $categorizedVariants = [];
+
+        foreach ($items as $item) {
+            $variant = $item->productVariant;
+            if (!$variant) continue;
+            $product = $variant->product;
+            if (!$product) continue;
+
+            $isBundle = ($product->product_type === 'bundle') && $variant->bundleAsBundle->isNotEmpty();
+
+            if ($isBundle) {
+                $bundleUnpackedPcs += (int)$item->qty;
+                foreach ($variant->bundleAsBundle as $bItem) {
+                    $compVariant = $bItem->componentVariant;
+                    if (!$compVariant) continue;
+                    $compProduct = $compVariant->product;
+                    if (!$compProduct) continue;
+
+                    $compQty = (int)($bItem->quantity * $item->qty);
+                    $compCategory = $compProduct->category?->name ?? '';
+                    $compType = $this->categorizeProductOrVariant($compCategory, $compProduct->product_name, $compVariant->sku);
+
+                    $vId = $compVariant->id;
+                    if (!isset($categorizedVariants[$vId])) {
+                        $categorizedVariants[$vId] = [
+                            'variant_id' => $vId,
+                            'product_id' => $compProduct->id,
+                            'product_name' => $compProduct->product_name,
+                            'sku' => $compVariant->sku,
+                            'size' => $compVariant->size,
+                            'color' => $compVariant->color,
+                            'barcode' => $compVariant->barcode,
+                            'category_name' => $compCategory ?: 'Tanpa Kategori',
+                            'seller_name' => $compProduct->seller?->seller_name ?? ($product->seller?->seller_name ?? '-'),
+                            'type' => $compType,
+                            'single_qty' => 0,
+                            'bundle_qty' => 0,
+                            'qty' => 0,
+                            'bundle_sources' => [],
+                            'price' => (float)$compVariant->price,
+                            'total_amount' => 0,
+                        ];
+                    }
+
+                    $categorizedVariants[$vId]['bundle_qty'] += $compQty;
+                    $categorizedVariants[$vId]['qty'] += $compQty;
+                    $categorizedVariants[$vId]['total_amount'] += ($compQty * (float)$compVariant->price);
+                    if (!in_array($product->product_name, $categorizedVariants[$vId]['bundle_sources'])) {
+                        $categorizedVariants[$vId]['bundle_sources'][] = $product->product_name;
+                    }
+
+                    $totalPcs += $compQty;
+                    if ($compType === 'baju') $bajuCount += $compQty;
+                    elseif ($compType === 'celana') $celanaCount += $compQty;
+                    else $otherCount += $compQty;
+                }
+            } else {
+                $categoryName = $product->category?->name ?? '';
+                $itemType = $this->categorizeProductOrVariant($categoryName, $product->product_name, $variant->sku);
+                $qty = (int)$item->qty;
+                $vId = $variant->id;
+
+                if (!isset($categorizedVariants[$vId])) {
+                    $categorizedVariants[$vId] = [
+                        'variant_id' => $vId,
+                        'product_id' => $product->id,
+                        'product_name' => $product->product_name,
+                        'sku' => $variant->sku,
+                        'size' => $variant->size,
+                        'color' => $variant->color,
+                        'barcode' => $variant->barcode,
+                        'category_name' => $categoryName ?: 'Tanpa Kategori',
+                        'seller_name' => $product->seller?->seller_name ?? '-',
+                        'type' => $itemType,
+                        'single_qty' => 0,
+                        'bundle_qty' => 0,
+                        'qty' => 0,
+                        'bundle_sources' => [],
+                        'price' => (float)($item->price ?: $variant->price),
+                        'total_amount' => 0,
+                    ];
+                }
+
+                $categorizedVariants[$vId]['single_qty'] += $qty;
+                $categorizedVariants[$vId]['qty'] += $qty;
+                $categorizedVariants[$vId]['total_amount'] += ($qty * (float)($item->price ?: $variant->price));
+
+                $totalPcs += $qty;
+                if ($itemType === 'baju') $bajuCount += $qty;
+                elseif ($itemType === 'celana') $celanaCount += $qty;
+                else $otherCount += $qty;
+            }
+        }
+
+        $resultList = array_values($categorizedVariants);
+
+        // Apply filter type if selected
+        if ($typeFilter && in_array($typeFilter, ['baju', 'celana', 'other'])) {
+            $resultList = array_filter($resultList, fn($i) => $i['type'] === $typeFilter);
+        }
+
+        // Apply search keyword
+        if ($search) {
+            $s = strtolower($search);
+            $resultList = array_filter($resultList, function ($i) use ($s) {
+                return str_contains(strtolower($i['sku']), $s)
+                    || str_contains(strtolower($i['product_name']), $s)
+                    || str_contains(strtolower($i['category_name']), $s)
+                    || str_contains(strtolower($i['seller_name']), $s)
+                    || str_contains(strtolower($i['size'] ?? ''), $s)
+                    || str_contains(strtolower($i['color'] ?? ''), $s)
+                    || str_contains(strtolower(implode(' ', $i['bundle_sources'])), $s);
+            });
+        }
+
+        // Sort descending by total QTY sold
+        usort($resultList, fn($a, $b) => $b['qty'] <=> $a['qty']);
+
+        return Inertia::render('Superadmin/Warehouse/StockOut/StockOutBajuCelana', [
+            'items' => array_values($resultList),
+            'summary' => [
+                'total_pcs' => $totalPcs,
+                'baju_count' => $bajuCount,
+                'celana_count' => $celanaCount,
+                'other_count' => $otherCount,
+                'bundle_unpacked_pcs' => $bundleUnpackedPcs,
+            ],
+            'periods' => $periods,
+            'warehouses' => $warehouses,
+            'stores' => $stores,
+            'sellers' => $sellers,
+            'filters' => [
+                'period_id' => $periodId,
+                'warehouse_id' => $warehouseId,
+                'store_id' => $storeId,
+                'seller_id' => $sellerId,
+                'search' => $search,
+                'type' => $typeFilter ?? 'all',
+            ],
+        ]);
+    }
+
+    private function categorizeProductOrVariant(string $categoryName = '', string $productName = '', string $sku = ''): string
+    {
+        $text = strtolower($categoryName . ' ' . $productName . ' ' . $sku);
+
+        // Celana / Bawahan
+        $celanaKeywords = [
+            'celana', 'pants', 'pant', 'kulot', 'cullote', 'culotte', 'jeans', 
+            'jogger', 'bawahan', 'short', 'shorts', 'rok', 'skirt', 'chino', 
+            'cargo', 'legging', 'kolor', 'boxer', 'sweatpants', 'hotpants', 'slacks', 'training'
+        ];
+        foreach ($celanaKeywords as $kw) {
+            if (str_contains($text, $kw)) {
+                return 'celana';
+            }
+        }
+
+        // Baju / Atasan
+        $bajuKeywords = [
+            'baju', 'kaos', 'shirt', 'tshirt', 't-shirt', 'kemeja', 'atasan', 
+            'top', 'hoodie', 'sweater', 'jaket', 'jacket', 'tunik', 'blouse', 
+            'dress', 'gamis', 'polo', 'outer', 'cardigan', 'blazer', 'vest', 
+            'singlet', 'jersey', 'crewneck', 'oversize'
+        ];
+        foreach ($bajuKeywords as $kw) {
+            if (str_contains($text, $kw)) {
+                return 'baju';
+            }
+        }
+
+        return 'other';
     }
 }

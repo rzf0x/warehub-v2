@@ -6,7 +6,7 @@
     import { 
         ArrowUpRight, Search, Plus, Trash2, Printer, BarChart3, Calculator, 
         FileText, Store, Package, DollarSign, Wallet, Sparkles, User, Calendar,
-        Edit2
+        Edit2, Shirt
     } from '@lucide/svelte';
 
     interface Item {
@@ -168,6 +168,14 @@
 
         <div class="flex flex-wrap items-center gap-2">
             <Link
+                href={`/superadmin/warehouse/stock-out/baju-celana?period_id=${periodId}&warehouse_id=${warehouseId}&store_id=${storeId}&user_id=${userId}&search=${encodeURIComponent(search)}`}
+                class="inline-flex items-center gap-2 rounded-xl border border-blue-200 dark:border-blue-900/60 bg-blue-50/80 dark:bg-blue-950/40 px-3 py-2 text-xs font-semibold text-blue-700 dark:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-900/60 transition-colors shadow-xs"
+            >
+                <Shirt class="h-4 w-4 text-blue-600 dark:text-blue-400" />
+                Pemisahan Baju & Celana
+            </Link>
+
+            <Link
                 href="/superadmin/warehouse/stock-out/chart"
                 class="inline-flex items-center gap-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors shadow-xs"
             >
@@ -184,7 +192,7 @@
             </Link>
 
             <a
-                href="/superadmin/warehouse/stock-out/summary/pdf"
+                href={`/superadmin/warehouse/stock-out/summary/pdf?period_id=${periodId}&warehouse_id=${warehouseId}&store_id=${storeId}&user_id=${userId}&search=${encodeURIComponent(search)}`}
                 target="_blank"
                 class="inline-flex items-center gap-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3.5 py-2 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors shadow-xs"
             >

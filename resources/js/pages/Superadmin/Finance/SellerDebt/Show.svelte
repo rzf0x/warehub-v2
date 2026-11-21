@@ -23,7 +23,8 @@
         X,
         Columns,
         Clock,
-        DollarSign
+        DollarSign,
+        Factory
     } from '@lucide/svelte';
 
     interface SellerDetail {
@@ -127,7 +128,7 @@
 
     function applyFilter() {
         router.get(
-            `/superadmin/finance/seller-debt/${seller.id}`,
+            `/superadmin/finance/seller-debt/${seller.uuid || seller.id}`,
             { period_id: periodId, search: searchQuery },
             { preserveState: true, replace: true }
         );
@@ -205,7 +206,7 @@
     }
 
     const pdfExportUrl = $derived(
-        `/superadmin/finance/seller-debt/${seller.id}/pdf${periodId ? `?period_id=${periodId}` : ''}`
+        `/superadmin/finance/seller-debt/${seller.uuid || seller.id}/pdf${periodId ? `?period_id=${periodId}` : ''}`
     );
 
     // Liquidation status evaluation
@@ -295,8 +296,17 @@
                 </div>
             </div>
 
-            <!-- Action Buttons: + Adjustment, WhatsApp, Cetak PDF -->
+            <!-- Action Buttons: Detail Debt Konveksi, + Adjustment, WhatsApp, Cetak PDF -->
             <div class="flex flex-wrap items-center gap-2.5 pt-2 lg:pt-0">
+                <Link
+                    href={`/superadmin/finance/seller-debt/${seller.uuid || seller.id}/konveksi${periodId ? `?period_id=${periodId}` : ''}`}
+                    class="inline-flex items-center gap-2 rounded-xl border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/60 px-3.5 py-2.5 text-xs font-bold text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 active:scale-95 transition-all shadow-xs"
+                    title="Lihat rincian sisa hutang modal per masing-masing vendor konveksi"
+                >
+                    <Factory class="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+                    Detail Debt Konveksi
+                </Link>
+
                 <button
                     onclick={openAdjustmentModal}
                     class="inline-flex items-center gap-2 rounded-xl bg-purple-600 px-4 py-2.5 text-xs font-bold text-white shadow-md shadow-purple-600/30 hover:bg-purple-700 active:scale-95 transition-all"
