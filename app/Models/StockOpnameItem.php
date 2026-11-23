@@ -27,7 +27,11 @@ class StockOpnameItem extends Model
     public static function getTableColumns(): array
     {
         if (static::$columnsCache === null) {
-            static::$columnsCache = array_flip(Schema::getColumnListing('stock_opname_items'));
+            try {
+                static::$columnsCache = array_flip(Schema::getColumnListing('stock_opname_items'));
+            } catch (\Throwable) {
+                static::$columnsCache = array_flip(['id', 'stock_opname_id', 'product_variant_id', 'system_qty', 'physical_qty', 'difference', 'created_at', 'updated_at']);
+            }
         }
 
         return static::$columnsCache;

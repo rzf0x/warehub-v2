@@ -19,7 +19,11 @@ class Seller extends Model
     public static function hasUuidColumn(): bool
     {
         if (static::$hasUuidColumnCache === null) {
-            static::$hasUuidColumnCache = Schema::hasColumn('sellers', 'uuid');
+            try {
+                static::$hasUuidColumnCache = Schema::hasColumn('sellers', 'uuid');
+            } catch (\Throwable) {
+                static::$hasUuidColumnCache = true;
+            }
         }
 
         return static::$hasUuidColumnCache;

@@ -33,7 +33,11 @@ class SellerDebtAdjustment extends Model
     public static function getTableColumns(): array
     {
         if (static::$columnsCache === null) {
-            static::$columnsCache = array_flip(Schema::getColumnListing('seller_debt_adjustments'));
+            try {
+                static::$columnsCache = array_flip(Schema::getColumnListing('seller_debt_adjustments'));
+            } catch (\Throwable) {
+                static::$columnsCache = array_flip(['id', 'seller_id', 'period_id', 'amount', 'reason', 'date', 'created_at', 'updated_at']);
+            }
         }
 
         return static::$columnsCache;
