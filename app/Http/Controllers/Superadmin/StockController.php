@@ -220,6 +220,11 @@ class StockController extends Controller
                 }
             }
 
+            foreach ($grouped as &$productGroup) {
+                $this->sortVariantsByApparelSize($productGroup['variants']);
+            }
+            unset($productGroup);
+
             $products = array_values($grouped);
         }
 
@@ -524,6 +529,11 @@ class StockController extends Controller
             $grandTotalQty += $qty;
             $grandTotalDebt += $variantDebt;
         }
+
+        foreach ($grouped as &$productGroup) {
+            $this->sortVariantsByApparelSize($productGroup['variants']);
+        }
+        unset($productGroup);
 
         $productsData = array_values($grouped);
         $totalProductsCount = count($productsData);
@@ -1122,6 +1132,71 @@ class StockController extends Controller
             'success',
             "Berhasil menyimpan hasil Stock Opname untuk {$result['count']} varian mitra {$seller->seller_name} (Audit #OPN-{$result['opname_id']}). Hutang modal lama tidak berubah."
         );
+    }
+
+    /**
+     * Sort variant items by logical apparel size order (XS, S, M, L, XL, XXL/2XL, 3XL, 4XL, 5XL, ...),
+     * then by color and SKU.
+     *
+     * @param array<int, array<string, mixed>> $variants
+     */
+    private function sortVariantsByApparelSize(array &$variants): void
+    {
+        $sizeRankMap = [
+            'XXS' => 1,
+            'XS' => 2,
+            'S' => 3,
+            'M' => 4,
+            'ML' => 5,
+            'M-L' => 5,
+            'L' => 6,
+            'L-XL' => 7,
+            'XL' => 8,
+            'XXL' => 9,
+            '2XL' => 9,
+            'XXXL' => 10,
+            '3XL' => 10,
+            'XXXXL' => 11,
+            '4XL' => 11,
+            'XXXXXL' => 12,
+            '5XL' => 12,
+            '6XL' => 13,
+            '7XL' => 14,
+            '8XL' => 15,
+            'STANDAR' => 50,
+            'STANDARD' => 50,
+            'ALL SIZE' => 51,
+            'ALLSIZE' => 51,
+            'JUMBO' => 52,
+        ];
+
+        $getRank = function (string $size) use ($sizeRankMap): int {
+            $norm = strtoupper(trim(preg_replace('/\s+/', ' ', $size)));
+            if (isset($sizeRankMap[$norm])) {
+                return $sizeRankMap[$norm];
+            }
+            if (is_numeric($norm)) {
+                return 100 + (int) $norm;
+            }
+
+            return 900;
+        };
+
+        usort($variants, function (array $a, array $b) use ($getRank): int {
+            $rankA = $getRank((string) ($a['size'] ?? ''));
+            $rankB = $getRank((string) ($b['size'] ?? ''));
+
+            if ($rankA !== $rankB) {
+                return $rankA <=> $rankB;
+            }
+
+            $colorCmp = strcasecmp((string) ($a['color'] ?? ''), (string) ($b['color'] ?? ''));
+            if ($colorCmp !== 0) {
+                return $colorCmp;
+            }
+
+            return strnatcasecmp((string) ($a['sku'] ?? ''), (string) ($b['sku'] ?? ''));
+        });
     }
 
     /**
