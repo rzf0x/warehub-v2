@@ -110,6 +110,7 @@ Route::middleware(['auth'])->group(function () {
 
             // Realtime Stocks & Logs
             Route::get('stocks/print-sku', [StockController::class, 'printSku'])->name('stocks.print-sku');
+            Route::post('stocks/print-sku/update-qty', [StockController::class, 'updatePrintSkuQty'])->name('stocks.print-sku.update-qty');
             Route::match(['get', 'post'], 'stocks/print-sku/pdf', [StockController::class, 'exportPrintSkuPdf'])->name('stocks.print-sku.pdf');
             Route::get('stocks/reconciliation', [StockController::class, 'reconciliation'])->name('stocks.reconciliation');
             Route::get('stocks/reconciliation/export-csv', [StockController::class, 'exportReconciliationCsv'])->name('stocks.reconciliation.export-csv');

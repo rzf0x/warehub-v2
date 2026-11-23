@@ -27,10 +27,13 @@
         qty_after: number;
         note: string;
         created_at: string;
+        user?: { id: number; name: string };
         warehouse?: { name: string };
         product_variant?: {
             sku: string;
-            product?: { product_name: string };
+            size?: string;
+            color?: string;
+            product?: { product_name: string; seller?: { seller_name?: string; name?: string } };
         };
     }
 
@@ -82,6 +85,26 @@
     function applyFilter() {
         const url = activeTab === 'logs' ? '/superadmin/warehouse/stocks/logs' : '/superadmin/warehouse/stocks';
         router.get(url, { search, warehouse_id: warehouseId }, { preserveState: true, replace: true });
+    }
+
+    function formatLogDateTime(dateStr: string): { dayDate: string; time: string } {
+        if (!dateStr) return { dayDate: '-', time: '-' };
+        const d = new Date(dateStr);
+        if (isNaN(d.getTime())) return { dayDate: dateStr, time: '' };
+        return {
+            dayDate: d.toLocaleDateString('id-ID', {
+                weekday: 'long',
+                day: '2-digit',
+                month: 'short',
+                year: 'numeric',
+            }),
+            time:
+                d.toLocaleTimeString('id-ID', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                }) + ' WIB',
+        };
     }
 </script>
 
@@ -311,28 +334,38 @@
                 <table class="w-full text-left text-sm text-slate-600 dark:text-slate-400">
                     <thead class="bg-slate-50 dark:bg-slate-800/50 text-xs uppercase font-semibold text-slate-500 dark:text-slate-400 border-b border-slate-100 dark:border-slate-800">
                         <tr>
-                            <th class="px-6 py-4">No</th>
-                            <th class="px-6 py-4">Waktu Log</th>
-                            <th class="px-6 py-4">Gudang</th>
-                            <th class="px-6 py-4">SKU & Produk</th>
-                            <th class="px-6 py-4">Sebelum</th>
-                            <th class="px-6 py-4">Perubahan (Diff)</th>
-                            <th class="px-6 py-4">Sesudah</th>
-                            <th class="px-6 py-4">Keterangan</th>
+                            <th class="px-5 py-4">No</th>
+                            <th class="px-5 py-4">Hari, Tanggal &amp; Jam</th>
+                            <th class="px-5 py-4">Gudang</th>
+                            <th class="px-5 py-4">Barang / SKU / Size</th>
+                            <th class="px-5 py-4 text-right">Stok Awal</th>
+                            <th class="px-5 py-4 text-right">Perubahan</th>
+                            <th class="px-5 py-4 text-right">Stok Akhir</th>
+                            <th class="px-5 py-4">Diubah Oleh</th>
+                            <th class="px-5 py-4">Keterangan</th>
                         </tr>
                     </thead>
                     <tbody class="divide-y divide-slate-100 dark:divide-slate-800">
                         {#each logs.data as logItem, index}
+                            {@const dt = formatLogDateTime(logItem.created_at)}
                             <tr class="hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-colors">
-                                <td class="px-6 py-4 text-xs text-slate-400">{index + 1 + (logs.current_page - 1) * 20}</td>
-                                <td class="px-6 py-4 text-xs font-mono">{logItem.created_at}</td>
-                                <td class="px-6 py-4 text-xs font-semibold text-slate-700 dark:text-slate-200">{logItem.warehouse?.name ?? '-'}</td>
-                                <td class="px-6 py-4">
-                                    <p class="font-mono text-xs font-bold text-indigo-600 dark:text-indigo-400">{logItem.product_variant?.sku ?? '-'}</p>
-                                    <p class="text-[11px] text-slate-500">{logItem.product_variant?.product?.product_name ?? '-'}</p>
+                                <td class="px-5 py-4 text-xs text-slate-400">{index + 1 + (logs.current_page - 1) * 20}</td>
+                                <td class="px-5 py-4 whitespace-nowrap">
+                                    <div class="text-xs font-bold text-slate-800 dark:text-slate-100">{dt.dayDate}</div>
+                                    <div class="text-[11px] font-mono text-indigo-600 dark:text-indigo-400">{dt.time}</div>
                                 </td>
-                                <td class="px-6 py-4 text-xs">{logItem.qty_before} pcs</td>
-                                <td class="px-6 py-4 font-bold">
+                                <td class="px-5 py-4 text-xs font-semibold text-slate-700 dark:text-slate-200">{logItem.warehouse?.name ?? '-'}</td>
+                                <td class="px-5 py-4">
+                                    <p class="font-bold text-xs text-slate-800 dark:text-slate-100">{logItem.product_variant?.product?.product_name ?? '-'}</p>
+                                    <p class="font-mono text-xs font-bold text-indigo-600 dark:text-indigo-400">
+                                        {logItem.product_variant?.sku ?? '-'}
+                                        {#if logItem.product_variant?.size}
+                                            <span class="text-slate-500 font-sans font-normal">({logItem.product_variant.size})</span>
+                                        {/if}
+                                    </p>
+                                </td>
+                                <td class="px-5 py-4 text-xs text-right font-semibold">{logItem.qty_before} pcs</td>
+                                <td class="px-5 py-4 font-bold text-right">
                                     {#if logItem.qty_change > 0}
                                         <span class="text-emerald-600 dark:text-emerald-400">+{logItem.qty_change} pcs</span>
                                     {:else if logItem.qty_change < 0}
@@ -341,12 +374,15 @@
                                         <span class="text-slate-400">0 pcs</span>
                                     {/if}
                                 </td>
-                                <td class="px-6 py-4 text-xs font-bold text-slate-800 dark:text-slate-100">{logItem.qty_after} pcs</td>
-                                <td class="px-6 py-4 text-xs text-slate-600 dark:text-slate-300">{logItem.note}</td>
+                                <td class="px-5 py-4 text-xs font-extrabold text-right text-slate-800 dark:text-slate-100">{logItem.qty_after} pcs</td>
+                                <td class="px-5 py-4 text-xs font-semibold text-slate-700 dark:text-slate-200 whitespace-nowrap">
+                                    {logItem.user?.name ?? 'System / Admin'}
+                                </td>
+                                <td class="px-5 py-4 text-xs text-slate-600 dark:text-slate-300">{logItem.note}</td>
                             </tr>
                         {:else}
                             <tr>
-                                <td colspan="8" class="px-6 py-12 text-center text-slate-400">Belum ada catatan log mutasi.</td>
+                                <td colspan="9" class="px-6 py-12 text-center text-slate-400">Belum ada catatan log mutasi.</td>
                             </tr>
                         {/each}
                     </tbody>

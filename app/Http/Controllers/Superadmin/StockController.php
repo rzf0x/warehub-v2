@@ -7,6 +7,7 @@ use App\Models\Period;
 use App\Models\Product;
 use App\Models\ProductVariant;
 use App\Models\Seller;
+use App\Models\SellerDebtAdjustment;
 use App\Models\Stock;
 use App\Models\StockLog;
 use App\Models\StockOpname;
@@ -69,7 +70,7 @@ class StockController extends Controller
         $warehouseId = $request->input('warehouse_id');
 
         $logs = StockLog::query()
-            ->with(['warehouse', 'productVariant.product'])
+            ->with(['warehouse', 'user:id,name', 'productVariant.product.seller'])
             ->when($warehouseId, fn($q) => $q->where('warehouse_id', $warehouseId))
             ->when($search, function ($query, $s) {
                 $query->where('note', 'like', "%{$s}%")
@@ -233,6 +234,191 @@ class StockController extends Controller
                 'warehouse_id' => $warehouseId ? (string) $warehouseId : '',
                 'search' => $search,
             ],
+        ]);
+    }
+
+    public function updatePrintSkuQty(Request $request)
+    {
+        $validated = $request->validate([
+            'variant_id' => ['required', 'integer', 'exists:product_variants,id'],
+            'qty' => ['required', 'integer', 'min:0'],
+            'warehouse_id' => ['nullable', 'integer', 'exists:warehouses,id'],
+        ]);
+
+        $variant = ProductVariant::with('product.seller')->findOrFail((int) $validated['variant_id']);
+        $targetQty = (int) $validated['qty'];
+        $warehouseId = ! empty($validated['warehouse_id']) ? (int) $validated['warehouse_id'] : null;
+
+        $result = DB::transaction(function () use ($request, $variant, $targetQty, $warehouseId) {
+            $oldTotalQty = $warehouseId
+                ? (int) Stock::where('warehouse_id', $warehouseId)->where('product_variant_id', $variant->id)->sum('qty')
+                : (int) Stock::where('product_variant_id', $variant->id)->sum('qty');
+
+            if (! $warehouseId) {
+                $existingStock = Stock::where('product_variant_id', $variant->id)
+                    ->orderByDesc('qty')
+                    ->orderBy('warehouse_id')
+                    ->first();
+
+                $warehouseId = $existingStock
+                    ? (int) $existingStock->warehouse_id
+                    : (int) (Warehouse::orderBy('id')->value('id') ?? 1);
+
+                $otherStocks = Stock::where('product_variant_id', $variant->id)
+                    ->where('warehouse_id', '!=', $warehouseId)
+                    ->where('qty', '!=', 0)
+                    ->lockForUpdate()
+                    ->get();
+            } else {
+                $otherStocks = collect();
+            }
+
+            $primaryStock = Stock::where('warehouse_id', $warehouseId)
+                ->where('product_variant_id', $variant->id)
+                ->lockForUpdate()
+                ->first();
+
+            if (! $primaryStock) {
+                $primaryStock = Stock::create([
+                    'warehouse_id' => $warehouseId,
+                    'product_variant_id' => $variant->id,
+                    'qty' => 0,
+                    'allocated_qty' => 0,
+                ]);
+            }
+
+            $logEntries = [];
+            $sellerId = $variant->product?->seller_id;
+            $sellerName = $variant->product?->seller?->seller_name ?? 'Mitra';
+            $now = now();
+
+            $netDifferenceForPrimary = $targetQty - (int) $primaryStock->qty;
+            $hasAnyStockChange = $otherStocks->isNotEmpty() || $netDifferenceForPrimary !== 0;
+            $stockOpname = null;
+            $opnameItems = [];
+
+            $userName = $request->user()?->name ?? 'Admin';
+
+            if ($hasAnyStockChange) {
+                $deltaAll = $targetQty - $oldTotalQty;
+                $deltaAllStr = $deltaAll > 0 ? "+{$deltaAll}" : (string) $deltaAll;
+                $stockOpname = StockOpname::create([
+                    'warehouse_id' => $warehouseId,
+                    'user_id' => $request->user()?->id,
+                    'date' => $now->toDateString(),
+                    'note' => "Edit Qty Print SKU: {$variant->sku} ({$sellerName}) [{$oldTotalQty} -> {$targetQty} Pcs ({$deltaAllStr})] oleh {$userName}",
+                ]);
+            }
+
+            foreach ($otherStocks as $other) {
+                $otherBefore = (int) $other->qty;
+                $otherDiff = 0 - $otherBefore;
+                $other->update(['qty' => 0]);
+
+                if ($stockOpname) {
+                    $opnameItems[] = StockOpnameItem::normalizeRowForInsert([
+                        'stock_opname_id' => $stockOpname->id,
+                        'product_variant_id' => $variant->id,
+                        'system_qty' => $otherBefore,
+                        'physical_qty' => 0,
+                        'difference' => $otherDiff,
+                        'created_at' => $now,
+                        'updated_at' => $now,
+                    ]);
+                }
+
+                $logEntries[] = [
+                    'stock_id' => $other->id,
+                    'product_variant_id' => $variant->id,
+                    'warehouse_id' => (int) $other->warehouse_id,
+                    'user_id' => $request->user()?->id,
+                    'reference_type' => StockOpname::class,
+                    'reference_id' => $stockOpname?->id ?? $other->id,
+                    'qty_before' => $otherBefore,
+                    'qty_change' => $otherDiff,
+                    'qty_after' => 0,
+                    'note' => "Konsolidasi Edit Qty Print SKU {$variant->sku} ({$sellerName}" . ($stockOpname ? ", #OPN-{$stockOpname->id}" : '') . ") oleh {$userName}",
+                ];
+            }
+
+            $qtyBefore = (int) $primaryStock->qty;
+            $difference = $targetQty - $qtyBefore;
+
+            if ($difference !== 0) {
+                $primaryStock->update(['qty' => $targetQty]);
+                $diffStr = $difference > 0 ? "+{$difference}" : (string) $difference;
+
+                if ($stockOpname) {
+                    $opnameItems[] = StockOpnameItem::normalizeRowForInsert([
+                        'stock_opname_id' => $stockOpname->id,
+                        'product_variant_id' => $variant->id,
+                        'system_qty' => $qtyBefore,
+                        'physical_qty' => $targetQty,
+                        'difference' => $difference,
+                        'created_at' => $now,
+                        'updated_at' => $now,
+                    ]);
+                }
+
+                $logEntries[] = [
+                    'stock_id' => $primaryStock->id,
+                    'product_variant_id' => $variant->id,
+                    'warehouse_id' => $warehouseId,
+                    'user_id' => $request->user()?->id,
+                    'reference_type' => StockOpname::class,
+                    'reference_id' => $stockOpname?->id ?? $primaryStock->id,
+                    'qty_before' => $qtyBefore,
+                    'qty_change' => $difference,
+                    'qty_after' => $targetQty,
+                    'note' => "Edit Qty dari Print SKU {$variant->sku} ({$sellerName}" . ($stockOpname ? ", #OPN-{$stockOpname->id}" : '') . ", Diff: {$diffStr}) oleh {$userName}",
+                ];
+            }
+
+            if (! empty($opnameItems)) {
+                StockOpnameItem::insert($opnameItems);
+            }
+
+            if (! empty($logEntries)) {
+                $this->insertSafeStockLogs($logEntries);
+            }
+
+            $totalQty = ! empty($validated['warehouse_id'])
+                ? (int) $primaryStock->qty
+                : (int) Stock::where('product_variant_id', $variant->id)->sum('qty');
+
+            $hpp = (float) ($variant->price ?? 0);
+            $netQtyDelta = $totalQty - $oldTotalQty;
+            $debtDelta = $netQtyDelta * $hpp;
+
+            if ($sellerId && $netQtyDelta !== 0 && $hpp > 0) {
+                $deltaLabel = $netQtyDelta > 0 ? "+{$netQtyDelta}" : (string) $netQtyDelta;
+                $activePeriodId = Period::where('is_public', true)->latest('id')->value('id')
+                    ?? Period::latest('id')->value('id');
+
+                SellerDebtAdjustment::create([
+                    'seller_id' => (int) $sellerId,
+                    'period_id' => $activePeriodId,
+                    'amount' => $debtDelta,
+                    'date' => now()->toDateString(),
+                    'reason' => "Penyesuaian Stok Print SKU {$variant->sku} ({$oldTotalQty} -> {$totalQty} Pcs [{$deltaLabel} Pcs x Rp " . number_format($hpp, 0, ',', '.') . '])',
+                ]);
+            }
+
+            return [
+                'variant_id' => $variant->id,
+                'product_id' => $variant->product_id,
+                'sku' => $variant->sku,
+                'qty' => $totalQty,
+                'hpp_price' => $hpp,
+                'total_debt' => $totalQty * $hpp,
+                'debt_delta' => $debtDelta,
+            ];
+        });
+
+        return response()->json([
+            'success' => true,
+            'message' => "Stok SKU {$result['sku']} berhasil diperbarui menjadi {$result['qty']} Pcs.",
+            'data' => $result,
         ]);
     }
 
@@ -746,7 +932,7 @@ class StockController extends Controller
                 $qtyBefore = (int) $stock->qty;
                 $difference = 0 - $qtyBefore;
 
-                $opnameItems[] = [
+                $opnameItems[] = StockOpnameItem::normalizeRowForInsert([
                     'stock_opname_id' => $stockOpname->id,
                     'product_variant_id' => $stock->product_variant_id,
                     'system_qty' => $qtyBefore,
@@ -754,7 +940,7 @@ class StockController extends Controller
                     'difference' => $difference,
                     'created_at' => $now,
                     'updated_at' => $now,
-                ];
+                ]);
 
                 $stock->update(['qty' => 0]);
 
@@ -890,7 +1076,7 @@ class StockController extends Controller
                 $difference = $entry['difference'];
                 $diffStr = $difference > 0 ? "+{$difference}" : (string) $difference;
 
-                $opnameItems[] = [
+                $opnameItems[] = StockOpnameItem::normalizeRowForInsert([
                     'stock_opname_id' => $stockOpname->id,
                     'product_variant_id' => $entry['variant_id'],
                     'system_qty' => $qtyBefore,
@@ -898,7 +1084,7 @@ class StockController extends Controller
                     'difference' => $difference,
                     'created_at' => $now,
                     'updated_at' => $now,
-                ];
+                ]);
 
                 $stock->update(['qty' => $physicalQty]);
 

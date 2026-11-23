@@ -7,11 +7,23 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 
 class Seller extends Model
 {
     use HasFactory;
+
+    protected static ?bool $hasUuidColumnCache = null;
+
+    public static function hasUuidColumn(): bool
+    {
+        if (static::$hasUuidColumnCache === null) {
+            static::$hasUuidColumnCache = Schema::hasColumn('sellers', 'uuid');
+        }
+
+        return static::$hasUuidColumnCache;
+    }
 
     protected $fillable = [
         'uuid',
@@ -28,7 +40,7 @@ class Seller extends Model
         parent::boot();
 
         static::creating(function ($seller) {
-            if (empty($seller->uuid)) {
+            if (static::hasUuidColumn() && empty($seller->uuid)) {
                 $seller->uuid = (string) Str::uuid();
             }
         });
@@ -36,13 +48,18 @@ class Seller extends Model
 
     public function getRouteKeyName(): string
     {
-        return 'uuid';
+        return static::hasUuidColumn() ? 'uuid' : 'id';
     }
 
     public function resolveRouteBinding($value, $field = null)
     {
-        return $this->where('uuid', $value)
-            ->orWhere('id', is_numeric($value) ? (int) $value : 0)
+        if (static::hasUuidColumn()) {
+            return $this->where('uuid', $value)
+                ->orWhere('id', is_numeric($value) ? (int) $value : 0)
+                ->firstOrFail();
+        }
+
+        return $this->where('id', is_numeric($value) ? (int) $value : 0)
             ->firstOrFail();
     }
 

@@ -20,7 +20,11 @@
         ChevronLeft,
         ChevronRight,
         X,
+        Pencil,
+        Check,
+        Loader2,
     } from '@lucide/svelte';
+    import { toast } from 'svelte-sonner';
 
     interface SellerOption {
         id: number;
@@ -93,6 +97,12 @@
     let showPreviewModal = $state(false);
     let onlyWithStock = $state(false);
 
+    // Local reactive copy of products so inline Qty edits reflect immediately without losing selection/expand state
+    let localProducts = $state<ProductItem[]>([]);
+    let editingVariantId = $state<number | null>(null);
+    let editingQtyValue = $state<number>(0);
+    let savingVariantId = $state<number | null>(null);
+
     // Client-side pagination to keep DOM ultra-light even when seller has hundreds of products
     let currentPage = $state(1);
     const pageSize = 20;
@@ -105,12 +115,93 @@
 
     // Reset selection when seller/warehouse changes (products payload from backend changes)
     $effect(() => {
-        // Touch products.length so it resets when backend reloads a new seller/warehouse
-        const _len = products.length;
+        // Clone products into localProducts so we can mutate qty reactively
+        localProducts = products.map((p) => ({
+            ...p,
+            variants: p.variants.map((v) => ({ ...v })),
+        }));
         expandedProducts = {};
         selectedVariantIds = {};
+        editingVariantId = null;
         currentPage = 1;
     });
+
+    function getCsrfToken(): string {
+        const meta = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content');
+        if (meta) return meta;
+        const match = document.cookie.match(/XSRF-TOKEN=([^;]+)/);
+        return match ? decodeURIComponent(match[1]) : '';
+    }
+
+    function startEditVariantQty(v: VariantItem, e?: Event) {
+        e?.stopPropagation();
+        editingVariantId = v.id;
+        editingQtyValue = v.qty;
+    }
+
+    function cancelEditVariantQty(e?: Event) {
+        e?.stopPropagation();
+        editingVariantId = null;
+    }
+
+    async function saveVariantQty(product: ProductItem, variant: VariantItem, e?: Event) {
+        e?.stopPropagation();
+        const parsedQty = Math.max(0, Math.floor(Number(editingQtyValue) || 0));
+
+        if (parsedQty === variant.qty) {
+            editingVariantId = null;
+            return;
+        }
+
+        savingVariantId = variant.id;
+        try {
+            const res = await fetch('/superadmin/warehouse/stocks/print-sku/update-qty', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Accept: 'application/json',
+                    'X-CSRF-TOKEN': getCsrfToken(),
+                    'X-XSRF-TOKEN': getCsrfToken(),
+                },
+                body: JSON.stringify({
+                    variant_id: variant.id,
+                    qty: parsedQty,
+                    warehouse_id: warehouseId ? Number(warehouseId) : null,
+                }),
+            });
+
+            const json = await res.json();
+            if (!res.ok || !json.success) {
+                throw new Error(json.message || 'Gagal memperbarui stok SKU.');
+            }
+
+            const newQty = Number(json.data.qty);
+            const newDebt = Number(json.data.total_debt);
+
+            // Update localProducts reactively
+            localProducts = localProducts.map((p) => {
+                if (p.id !== product.id) return p;
+                const updatedVariants = p.variants.map((v) =>
+                    v.id === variant.id ? { ...v, qty: newQty, total_debt: newDebt } : v
+                );
+                const totalQty = updatedVariants.reduce((sum, v) => sum + v.qty, 0);
+                const totalDebt = updatedVariants.reduce((sum, v) => sum + v.total_debt, 0);
+                return {
+                    ...p,
+                    variants: updatedVariants,
+                    total_qty: totalQty,
+                    total_debt: totalDebt,
+                };
+            });
+
+            toast.success(json.message || `Stok ${variant.sku} diperbarui ke ${newQty} pcs`);
+            editingVariantId = null;
+        } catch (err: any) {
+            toast.error(err?.message || 'Terjadi kesalahan saat menyimpan stok.');
+        } finally {
+            savingVariantId = null;
+        }
+    }
 
     function formatRupiah(num: number): string {
         return new Intl.NumberFormat('id-ID', {
@@ -133,7 +224,7 @@
     const displayedProducts = $derived.by(() => {
         const keyword = search.trim().toLowerCase();
 
-        return products.filter((p) => {
+        return localProducts.filter((p) => {
             if (onlyWithStock && p.total_qty <= 0) {
                 return false;
             }
@@ -174,7 +265,7 @@
         let grandTotalQty = 0;
         let grandTotalDebt = 0;
 
-        for (const p of products) {
+        for (const p of localProducts) {
             const chosenVariants = p.variants.filter((v) => selectedVariantIds[v.id]);
             if (chosenVariants.length > 0) {
                 const subQty = chosenVariants.reduce((acc, v) => acc + v.qty, 0);
@@ -697,8 +788,63 @@
                                                     <td class="px-4 py-2.5 text-right font-medium text-slate-700 dark:text-slate-300">
                                                         {formatRupiah(v.hpp_price)}
                                                     </td>
-                                                    <td class="px-4 py-2.5 text-right font-extrabold {v.qty <= 0 ? 'text-rose-500' : v.qty <= 5 ? 'text-amber-600' : 'text-emerald-600 dark:text-emerald-400'}">
-                                                        {v.qty.toLocaleString('id-ID')} pcs
+                                                    <td
+                                                        class="px-4 py-2.5 text-right"
+                                                        onclick={(e) => e.stopPropagation()}
+                                                    >
+                                                        {#if editingVariantId === v.id}
+                                                            <div class="inline-flex items-center justify-end gap-1.5">
+                                                                <input
+                                                                    type="number"
+                                                                    min="0"
+                                                                    step="1"
+                                                                    bind:value={editingQtyValue}
+                                                                    onkeydown={(e) => {
+                                                                        if (e.key === 'Enter') saveVariantQty(product, v, e);
+                                                                        if (e.key === 'Escape') cancelEditVariantQty(e);
+                                                                    }}
+                                                                    disabled={savingVariantId === v.id}
+                                                                    class="w-20 rounded-lg border border-emerald-500 bg-white dark:bg-slate-900 px-2 py-1 text-right text-xs font-bold text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                                                />
+                                                                <button
+                                                                    type="button"
+                                                                    onclick={(e) => saveVariantQty(product, v, e)}
+                                                                    disabled={savingVariantId === v.id}
+                                                                    class="rounded-lg bg-emerald-600 p-1.5 text-white hover:bg-emerald-700 disabled:opacity-50 transition-colors cursor-pointer"
+                                                                    title="Simpan Total Qty"
+                                                                >
+                                                                    {#if savingVariantId === v.id}
+                                                                        <Loader2 class="h-3.5 w-3.5 animate-spin" />
+                                                                    {:else}
+                                                                        <Check class="h-3.5 w-3.5" />
+                                                                    {/if}
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    onclick={(e) => cancelEditVariantQty(e)}
+                                                                    disabled={savingVariantId === v.id}
+                                                                    class="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors cursor-pointer"
+                                                                    title="Batal"
+                                                                >
+                                                                    <X class="h-3.5 w-3.5" />
+                                                                </button>
+                                                            </div>
+                                                        {:else}
+                                                            <div class="inline-flex items-center justify-end gap-2 group/qty">
+                                                                <span class="font-extrabold {v.qty <= 0 ? 'text-rose-500' : v.qty <= 5 ? 'text-amber-600' : 'text-emerald-600 dark:text-emerald-400'}">
+                                                                    {v.qty.toLocaleString('id-ID')} pcs
+                                                                </span>
+                                                                <button
+                                                                    type="button"
+                                                                    onclick={(e) => startEditVariantQty(v, e)}
+                                                                    class="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1 text-[11px] font-semibold text-slate-600 dark:text-slate-300 hover:border-emerald-500 hover:text-emerald-600 dark:hover:text-emerald-400 transition-colors cursor-pointer"
+                                                                    title="Edit Total Qty Stok"
+                                                                >
+                                                                    <Pencil class="h-3 w-3" />
+                                                                    Edit
+                                                                </button>
+                                                            </div>
+                                                        {/if}
                                                     </td>
                                                     <td class="px-4 py-2.5 text-right font-extrabold {v.total_debt > 0 ? 'text-rose-600 dark:text-rose-400' : 'text-slate-500'}">
                                                         {formatRupiah(v.total_debt)}

@@ -80,8 +80,8 @@ class SellerDebtController extends Controller
 
     public function show(Seller $seller, Request $request)
     {
-        // Enforce UUID in URL for security
-        if ($request->segment(4) === (string)$seller->id) {
+        // Enforce UUID in URL for security (only if uuid column exists and is populated)
+        if (! empty($seller->uuid) && $request->segment(4) === (string) $seller->id) {
             return redirect()->to(str_replace('/seller-debt/' . $seller->id, '/seller-debt/' . $seller->uuid, $request->getRequestUri()));
         }
 
@@ -172,8 +172,8 @@ class SellerDebtController extends Controller
 
     public function exportPdf(Seller $seller, Request $request)
     {
-        // Enforce UUID in URL for security
-        if ($request->segment(4) === (string)$seller->id) {
+        // Enforce UUID in URL for security (only if uuid column exists and is populated)
+        if (! empty($seller->uuid) && $request->segment(4) === (string) $seller->id) {
             return redirect()->to(str_replace('/seller-debt/' . $seller->id, '/seller-debt/' . $seller->uuid, $request->getRequestUri()));
         }
 
@@ -274,8 +274,8 @@ class SellerDebtController extends Controller
 
     public function konveksiDetail(Seller $seller, Request $request)
     {
-        // Enforce UUID in URL for security
-        if ($request->segment(4) === (string)$seller->id) {
+        // Enforce UUID in URL for security (only if uuid column exists and is populated)
+        if (! empty($seller->uuid) && $request->segment(4) === (string) $seller->id) {
             return redirect()->to(str_replace('/seller-debt/' . $seller->id, '/seller-debt/' . $seller->uuid, $request->getRequestUri()));
         }
 
@@ -561,10 +561,9 @@ class SellerDebtController extends Controller
         SellerDebtAdjustment::create([
             'seller_id' => $validated['seller_id'],
             'period_id' => $validated['period_id'] ?? null,
-            'created_by' => $request->user()?->id,
             'amount' => $validated['amount'],
-            'adjustment_date' => $validated['adjustment_date'],
-            'note' => $validated['note'] ?? null,
+            'date' => $validated['adjustment_date'],
+            'reason' => $validated['note'] ?? 'Penyesuaian Saldo Manual',
         ]);
 
         return redirect()->back()->with('success', 'Penyesuaian saldo hutang seller berhasil disimpan.');

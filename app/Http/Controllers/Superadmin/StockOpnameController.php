@@ -20,21 +20,61 @@ class StockOpnameController extends Controller
     {
         $search = $request->input('search');
         $warehouseId = $request->input('warehouse_id');
+        $opnameCols = StockOpname::getTableColumns();
+        $hasUserCol = isset($opnameCols['user_id']) || isset($opnameCols['created_by']);
+
+        $withRelations = ['warehouse', 'items.productVariant.product.seller'];
+        if ($hasUserCol) {
+            $withRelations[] = 'user';
+        }
 
         $stockOpnames = StockOpname::query()
-            ->with(['warehouse', 'user', 'items.productVariant.product'])
-            ->when($search, function ($query, $s) {
-                $query->where('note', 'like', "%{$s}%");
+            ->with($withRelations)
+            ->when($search, function ($query, $s) use ($hasUserCol) {
+                $query->where(function ($sub) use ($s, $hasUserCol) {
+                    $sub->where('note', 'like', "%{$s}%")
+                        ->when($hasUserCol, fn ($q) => $q->orWhereHas('user', fn ($uq) => $uq->where('name', 'like', "%{$s}%")))
+                        ->orWhereHas('items.productVariant', function ($vq) use ($s) {
+                            $vq->where('sku', 'like', "%{$s}%")
+                                ->orWhereHas('product', fn ($pq) => $pq->where('product_name', 'like', "%{$s}%"));
+                        });
+                });
             })
-            ->when($warehouseId, fn($q) => $q->where('warehouse_id', $warehouseId))
-            ->latest()
+            ->when($warehouseId, fn ($q) => $q->where('warehouse_id', $warehouseId))
+            ->latest('created_at')
+            ->latest('id')
             ->paginate(10)
+            ->withQueryString();
+
+        $itemRelations = ['stockOpname.warehouse', 'productVariant.product.seller'];
+        if ($hasUserCol) {
+            $itemRelations[] = 'stockOpname.user';
+        }
+
+        $opnameItemsHistory = StockOpnameItem::query()
+            ->with($itemRelations)
+            ->when($warehouseId, fn ($q) => $q->whereHas('stockOpname', fn ($sq) => $sq->where('warehouse_id', $warehouseId)))
+            ->when($search, function ($query, $s) use ($hasUserCol) {
+                $query->where(function ($sub) use ($s, $hasUserCol) {
+                    $sub->whereHas('stockOpname', function ($oq) use ($s, $hasUserCol) {
+                        $oq->where('note', 'like', "%{$s}%")
+                            ->when($hasUserCol, fn ($q) => $q->orWhereHas('user', fn ($uq) => $uq->where('name', 'like', "%{$s}%")));
+                    })->orWhereHas('productVariant', function ($vq) use ($s) {
+                        $vq->where('sku', 'like', "%{$s}%")
+                            ->orWhereHas('product', fn ($pq) => $pq->where('product_name', 'like', "%{$s}%"));
+                    });
+                });
+            })
+            ->latest('created_at')
+            ->latest('id')
+            ->paginate(20, ['*'], 'items_page')
             ->withQueryString();
 
         $warehouses = Warehouse::select('id', 'name')->get();
 
         return Inertia::render('Superadmin/Warehouse/StockOpname/Index', [
             'stockOpnames' => $stockOpnames,
+            'opnameItemsHistory' => $opnameItemsHistory,
             'warehouses' => $warehouses,
             'filters' => [
                 'search' => $search,
