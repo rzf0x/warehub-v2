@@ -518,17 +518,20 @@ class StockOutController extends Controller
         }
 
         $variants = ProductVariant::with([
-            'product.seller',
+            'product:id,seller_id,product_name,product_type,sku',
+            'product.seller:id,seller_name',
             'stocks' => function ($q) use ($warehouseId) {
                 if ($warehouseId) $q->where('warehouse_id', $warehouseId);
             },
+            'bundleAsBundle.componentVariant:id,product_id,sku,size,color,price',
             'bundleAsBundle.componentVariant.stocks' => function ($q) use ($warehouseId) {
                 if ($warehouseId) $q->where('warehouse_id', $warehouseId);
             },
-            'bundleAsBundle.componentVariant.product'
-        ])->get();
+            'bundleAsBundle.componentVariant.product:id,product_name'
+        ])->select('id', 'product_id', 'sku', 'size', 'color', 'price')->get();
 
         $skuMap = [];
+        $sizeGroups = [];
         foreach ($variants as $v) {
             $skuClean = strtoupper(trim($v->sku));
             $skuMap[$skuClean] = $v;
@@ -536,7 +539,44 @@ class StockOutController extends Controller
             if (!isset($skuMap[$noSpaceSku])) {
                 $skuMap[$noSpaceSku] = $v;
             }
+
+            $vSize = strtoupper(trim((string)$v->size));
+            $canonicalSize = match ($vSize) {
+                'XXL' => '2XL',
+                'XXXL' => '3XL',
+                'XXXXL' => '4XL',
+                'XXXXXL' => '5XL',
+                default => $vSize,
+            };
+            if ($canonicalSize !== '') {
+                $entry = [
+                    'dbSku' => $skuClean,
+                    'noSpaceSku' => $noSpaceSku,
+                    'variant' => $v,
+                ];
+                $sizeGroups[$canonicalSize][] = $entry;
+                if ($canonicalSize !== $vSize) {
+                    $sizeGroups[$vSize][] = $entry;
+                }
+            }
         }
+
+        $stockInfoCache = [];
+        $getCachedStockInfo = function ($v) use ($warehouseId, &$stockInfoCache) {
+            if (!isset($stockInfoCache[$v->id])) {
+                $stockInfoCache[$v->id] = $this->getVariantStockInfo($v, $warehouseId);
+            }
+            return $stockInfoCache[$v->id];
+        };
+
+        $resolveCache = [];
+        $resolveCached = function (string $testSku, string $varText, string $fullSkuText) use (&$resolveCache, $skuMap, $sizeGroups) {
+            $cacheKey = strtoupper(trim($testSku)) . '|' . strtoupper(trim($varText)) . '|' . strtoupper(trim($fullSkuText));
+            if (!array_key_exists($cacheKey, $resolveCache)) {
+                $resolveCache[$cacheKey] = $this->resolveVariantFromSkuAndSize($testSku, $varText, $fullSkuText, $skuMap, $sizeGroups);
+            }
+            return $resolveCache[$cacheKey];
+        };
 
         $matchedItems = [];
         $missingSkus = [];
@@ -596,21 +636,21 @@ class StockOutController extends Controller
 
                 foreach ($parts as $idx => $part) {
                     $testPart = $part;
-                    $partV = $this->resolveVariantFromSkuAndSize($testPart, $variantName, $rawSku, $skuMap);
+                    $partV = $resolveCached($testPart, $variantName, $rawSku);
 
                     // If not resolved and subsequent part is just number/short code, try with prefix
                     if (!$partV && $idx > 0 && $prefix && !preg_match('/^[A-Za-z]/', $part)) {
                         $pTrim = rtrim($prefix);
                         $testPart = $pTrim . ' ' . $part;
-                        $partV = $this->resolveVariantFromSkuAndSize($testPart, $variantName, $rawSku, $skuMap);
+                        $partV = $resolveCached($testPart, $variantName, $rawSku);
                         if (!$partV) {
                             $testPart = rtrim($prefix, " \t\n\r\0\x0B-_") . $part;
-                            $partV = $this->resolveVariantFromSkuAndSize($testPart, $variantName, $rawSku, $skuMap);
+                            $partV = $resolveCached($testPart, $variantName, $rawSku);
                         }
                     }
 
                     if ($partV) {
-                        $stockInfo = $this->getVariantStockInfo($partV, $warehouseId);
+                        $stockInfo = $getCachedStockInfo($partV);
                         $subMatched[] = [
                             'product_variant_id' => $partV->id,
                             'sku' => $partV->sku,
@@ -643,9 +683,9 @@ class StockOutController extends Controller
             }
 
             // 2. Direct resolve on single raw SKU
-            $directV = $this->resolveVariantFromSkuAndSize($rawSku, $variantName, $rawSku, $skuMap);
+            $directV = $resolveCached($rawSku, $variantName, $rawSku);
             if ($directV) {
-                $stockInfo = $this->getVariantStockInfo($directV, $warehouseId);
+                $stockInfo = $getCachedStockInfo($directV);
                 $unitSelling = $paymentAmt > 0 ? (float)round($paymentAmt / max(1, $qty), 2) : (float)($directV->price ?? 0);
                 $matchedItems[] = [
                     'product_variant_id' => $directV->id,
@@ -832,7 +872,7 @@ class StockOutController extends Controller
         return array_values(array_unique($sizes));
     }
 
-    private function resolveVariantFromSkuAndSize(string $rawSku, string $varText, string $fullSkuText, array $skuMap)
+    private function resolveVariantFromSkuAndSize(string $rawSku, string $varText, string $fullSkuText, array $skuMap, array $sizeGroups = [])
     {
         $cleanSku = strtoupper(trim($rawSku));
         $noSpaceSku = str_replace(' ', '', $cleanSku);
@@ -852,23 +892,46 @@ class StockOutController extends Controller
             if (isset($skuMap[$cleanSku . '-' . $size . '-1'])) return $skuMap[$cleanSku . '-' . $size . '-1'];
             if (isset($skuMap[$noSpaceSku . '-' . $size . '-1'])) return $skuMap[$noSpaceSku . '-' . $size . '-1'];
 
-            // Prefix match
+            // Prefix match (optimized via pre-grouped $sizeGroups if available)
             $prefix1 = $cleanSku . '-';
             $prefix2 = $noSpaceSku . '-';
-            foreach ($skuMap as $dbSku => $variant) {
-                $vSize = strtoupper(trim((string)$variant->size));
-                $sizeMatched = ($vSize === $size || 
-                    ($size === 'XXL' && $vSize === '2XL') || ($size === '2XL' && $vSize === 'XXL') ||
-                    ($size === 'XXXL' && $vSize === '3XL') || ($size === '3XL' && $vSize === 'XXXL') ||
-                    ($size === 'XXXXL' && $vSize === '4XL') || ($size === '4XL' && $vSize === 'XXXXL') ||
-                    ($size === 'XXXXXL' && $vSize === '5XL') || ($size === '5XL' && $vSize === 'XXXXXL')
-                );
-                if ($sizeMatched) {
-                    if (str_starts_with($dbSku, $prefix1) || str_starts_with($dbSku, $prefix2) || str_starts_with($dbSku, $cleanSku . $size) || str_starts_with($dbSku, $noSpaceSku . $size)) {
-                        return $variant;
+            $prefix3 = $cleanSku . $size;
+            $prefix4 = $noSpaceSku . $size;
+            $regex = '/^' . preg_quote($cleanSku, '/') . '(?![0-9])/i';
+
+            if (!empty($sizeGroups)) {
+                $candidates = $sizeGroups[$size] ?? [];
+                foreach ($candidates as $cand) {
+                    $dbSku = $cand['dbSku'];
+                    $dbNoSpace = $cand['noSpaceSku'];
+                    if (
+                        str_starts_with($dbSku, $prefix1) ||
+                        str_starts_with($dbNoSpace, $prefix2) ||
+                        str_starts_with($dbSku, $prefix3) ||
+                        str_starts_with($dbNoSpace, $prefix4)
+                    ) {
+                        return $cand['variant'];
                     }
-                    if (preg_match('/^' . preg_quote($cleanSku, '/') . '(?![0-9])/i', $dbSku) && str_contains($dbSku, $size)) {
-                        return $variant;
+                    if (preg_match($regex, $dbSku) && str_contains($dbSku, $size)) {
+                        return $cand['variant'];
+                    }
+                }
+            } else {
+                foreach ($skuMap as $dbSku => $variant) {
+                    $vSize = strtoupper(trim((string)$variant->size));
+                    $sizeMatched = ($vSize === $size ||
+                        ($size === 'XXL' && $vSize === '2XL') || ($size === '2XL' && $vSize === 'XXL') ||
+                        ($size === 'XXXL' && $vSize === '3XL') || ($size === '3XL' && $vSize === 'XXXL') ||
+                        ($size === 'XXXXL' && $vSize === '4XL') || ($size === '4XL' && $vSize === 'XXXXL') ||
+                        ($size === 'XXXXXL' && $vSize === '5XL') || ($size === '5XL' && $vSize === 'XXXXXL')
+                    );
+                    if ($sizeMatched) {
+                        if (str_starts_with($dbSku, $prefix1) || str_starts_with($dbSku, $prefix2) || str_starts_with($dbSku, $prefix3) || str_starts_with($dbSku, $prefix4)) {
+                            return $variant;
+                        }
+                        if (preg_match($regex, $dbSku) && str_contains($dbSku, $size)) {
+                            return $variant;
+                        }
                     }
                 }
             }

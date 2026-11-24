@@ -159,6 +159,117 @@
     let searchDebounceTimeout: any = null;
     let localVariants = $state<VariantData[]>([...variants]);
 
+    const SIZE_SORT_ORDER: Record<string, number> = {
+        "3XS": 1,
+        XXXS: 1,
+        "2XS": 2,
+        XXS: 2,
+        XS: 3,
+        S: 4,
+        M: 5,
+        ML: 6,
+        "M-L": 6,
+        L: 7,
+        "L-XL": 8,
+        XL: 9,
+        "2XL": 10,
+        XXL: 10,
+        "3XL": 11,
+        XXXL: 11,
+        "4XL": 12,
+        XXXXL: 12,
+        "5XL": 13,
+        XXXXXL: 13,
+        "6XL": 14,
+        XXXXXXL: 14,
+        "7XL": 15,
+        "ALL SIZE": 50,
+        ALLSIZE: 50,
+        STANDAR: 51,
+        STANDARD: 51,
+        JUMBO: 52,
+        "-": 99,
+        "": 100,
+    };
+
+    function getSizeRank(sizeStr?: string, skuStr?: string): number {
+        let s = (sizeStr || "").toUpperCase().trim().replace(/\s+/g, " ");
+        if (!s && skuStr) {
+            const m = skuStr
+                .toUpperCase()
+                .match(
+                    /[\-\s](5XL|4XL|3XL|2XL|XXXXXL|XXXXL|XXXL|XXL|XL|L|M|S|XS|\d{1,3})$/,
+                );
+            if (m) s = m[1];
+        }
+        if (SIZE_SORT_ORDER[s] !== undefined) {
+            return SIZE_SORT_ORDER[s];
+        }
+        // Numeric sizes (e.g. 27, 28, 29, ..., 44)
+        if (/^\d+(\.\d+)?$/.test(s)) {
+            return 20 + parseFloat(s) * 0.1;
+        }
+        // Check if size string contains a standard size token (e.g. "SIZE XL", "UKURAN 2XL")
+        const tokenMatch = s.match(
+            /\b(5XL|4XL|3XL|2XL|XXXXXL|XXXXL|XXXL|XXL|XL|L|M|S|XS)\b/,
+        );
+        if (tokenMatch && SIZE_SORT_ORDER[tokenMatch[1]] !== undefined) {
+            return SIZE_SORT_ORDER[tokenMatch[1]];
+        }
+        const numMatch = s.match(/\b(\d{1,3})\b/);
+        if (numMatch) {
+            return 20 + parseFloat(numMatch[1]) * 0.1;
+        }
+        return 80;
+    }
+
+    function extractBaseSkuForSort(skuStr?: string, sizeStr?: string): string {
+        const raw = (skuStr || "").toUpperCase().trim();
+        if (!raw) return "";
+        const sz = (sizeStr || "").toUpperCase().trim();
+        if (sz) {
+            const escapedSz = sz.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            const stripped = raw.replace(
+                new RegExp(`[\\-\\s_]*${escapedSz}(?:\\-1)?$`, "i"),
+                "",
+            );
+            if (stripped) return stripped.trim();
+        }
+        return raw
+            .replace(
+                /[\-\s_]+(5XL|4XL|3XL|2XL|XXXXXL|XXXXL|XXXL|XXL|XL|L|M|S|XS|ALL\s*SIZE|JUMBO|STANDAR)(?:\-1)?$/i,
+                "",
+            )
+            .trim();
+    }
+
+    function sortFormItemsBySkuAndSize(items: FormItem[]): FormItem[] {
+        return [...items].sort((a, b) => {
+            // Unselected manual rows stay at the bottom in their order
+            if (!a.product_variant_id && !b.product_variant_id) return 0;
+            if (!a.product_variant_id) return 1;
+            if (!b.product_variant_id) return -1;
+
+            const baseA = extractBaseSkuForSort(a.sku, a.size);
+            const baseB = extractBaseSkuForSort(b.sku, b.size);
+
+            const baseCmp = baseA.localeCompare(baseB, undefined, {
+                numeric: true,
+                sensitivity: "base",
+            });
+            if (baseCmp !== 0) return baseCmp;
+
+            const rankA = getSizeRank(a.size, a.sku);
+            const rankB = getSizeRank(b.size, b.sku);
+            if (rankA !== rankB) return rankA - rankB;
+
+            return (a.sku || "").localeCompare(b.sku || "", undefined, {
+                numeric: true,
+                sensitivity: "base",
+            });
+        });
+    }
+
     function consolidateFormItems(items: FormItem[]): FormItem[] {
         const map = new Map<string, FormItem>();
 
@@ -178,7 +289,9 @@
                     ...item,
                     qty: Number(item.qty || 0),
                     price: Number(item.price || 0),
-                    selling_price: Number(Number(item.selling_price || 0).toFixed(2)),
+                    selling_price: Number(
+                        Number(item.selling_price || 0).toFixed(2),
+                    ),
                 });
             } else {
                 const existing = map.get(key)!;
@@ -201,7 +314,7 @@
             }
         }
 
-        return Array.from(map.values());
+        return sortFormItemsBySkuAndSize(Array.from(map.values()));
     }
 
     // If Edit Mode, populate existing items
@@ -237,12 +350,25 @@
                 try {
                     const parsed = JSON.parse(stockOut.resi_summary);
                     if (Array.isArray(parsed)) {
-                        const hasAnyPositive = parsed.some((r: any) => Number(r.payment || 0) > 0);
-                        if (!hasAnyPositive && Number(stockOut.total_selling_price || 0) > 0 && parsed.length > 0) {
-                            const perItem = Math.round(Number(stockOut.total_selling_price) / parsed.length);
+                        const hasAnyPositive = parsed.some(
+                            (r: any) => Number(r.payment || 0) > 0,
+                        );
+                        if (
+                            !hasAnyPositive &&
+                            Number(stockOut.total_selling_price || 0) > 0 &&
+                            parsed.length > 0
+                        ) {
+                            const perItem = Math.round(
+                                Number(stockOut.total_selling_price) /
+                                    parsed.length,
+                            );
                             let running = 0;
                             resiList = parsed.map((r: any, idx: number) => {
-                                const pay = idx === parsed.length - 1 ? (Number(stockOut.total_selling_price) - running) : perItem;
+                                const pay =
+                                    idx === parsed.length - 1
+                                        ? Number(stockOut.total_selling_price) -
+                                          running
+                                        : perItem;
                                 running += pay;
                                 return {
                                     order_id: r.order_id || "",
@@ -254,7 +380,11 @@
                             resiList = parsed.map((r: any) => ({
                                 order_id: r.order_id || "",
                                 no_resi: r.no_resi || "",
-                                payment: r.payment !== undefined && r.payment !== null ? Number(r.payment) : 0,
+                                payment:
+                                    r.payment !== undefined &&
+                                    r.payment !== null
+                                        ? Number(r.payment)
+                                        : 0,
                             }));
                         }
                     }
@@ -301,8 +431,12 @@
     }
 
     // Manual Items Management
+    let editingSellingPriceIndex = $state<number | null>(null);
+
     function addManualItem(paramSellerId?: number) {
-        const sId = paramSellerId ?? (sellerId ? Number(sellerId) : (sellers[0]?.id ?? null));
+        const sId =
+            paramSellerId ??
+            (sellerId ? Number(sellerId) : (sellers[0]?.id ?? null));
         const sName = sellers.find((s) => s.id === sId)?.seller_name ?? "Mitra";
         const newIndex = formItems.length;
         formItems = [
@@ -318,14 +452,66 @@
                 available_stock: 0,
             },
         ];
+        if (newIndex >= displayLimit) {
+            displayLimit = newIndex + 10;
+        }
         openVariantSelector(newIndex, sId);
+    }
+
+    function insertManualItemAfter(targetIndex: number, refItem?: FormItem) {
+        const sId =
+            refItem?.seller_id ??
+            (sellerId ? Number(sellerId) : (sellers[0]?.id ?? null));
+        const sName =
+            refItem?.seller_name ||
+            sellers.find((s) => s.id === sId)?.seller_name ||
+            "Mitra";
+        const kId = refItem?.konveksi_id ?? null;
+
+        const newItem: FormItem = {
+            product_variant_id: null,
+            konveksi_id: kId,
+            seller_id: sId,
+            seller_name: sName,
+            qty: 1,
+            price: 0,
+            selling_price: refItem?.selling_price ? Number(refItem.selling_price) : 0,
+            available_stock: 0,
+        };
+
+        const insertIdx = targetIndex + 1;
+        formItems = [
+            ...formItems.slice(0, insertIdx),
+            newItem,
+            ...formItems.slice(insertIdx),
+        ];
+
+        if (insertIdx >= displayLimit) {
+            displayLimit = insertIdx + 10;
+        }
+
+        const initialBaseSku = refItem?.sku
+            ? extractBaseSkuForSort(refItem.sku, refItem.size)
+            : "";
+        openVariantSelector(insertIdx, sId, initialBaseSku);
     }
 
     function removeManualItem(index: number) {
         if (editingVariantIndex === index) {
             editingVariantIndex = null;
-        } else if (editingVariantIndex !== null && editingVariantIndex > index) {
+        } else if (
+            editingVariantIndex !== null &&
+            editingVariantIndex > index
+        ) {
             editingVariantIndex--;
+        }
+        if (editingSellingPriceIndex === index) {
+            editingSellingPriceIndex = null;
+        } else if (
+            editingSellingPriceIndex !== null &&
+            editingSellingPriceIndex > index
+        ) {
+            editingSellingPriceIndex--;
         }
         formItems = formItems.filter((_, idx) => idx !== index);
     }
@@ -336,7 +522,8 @@
             v = variant;
         } else {
             const vId = Number(variant);
-            v = searchResults.find((i) => i.id === vId) ||
+            v =
+                searchResults.find((i) => i.id === vId) ||
                 localVariants.find((i) => i.id === vId) ||
                 variants.find((i) => i.id === vId);
         }
@@ -360,14 +547,18 @@
             size: v.size,
             color: v.color,
             price: v.price,
-            selling_price: currentSelling > 0 ? currentSelling : v.selling_price,
+            selling_price:
+                currentSelling > 0 ? currentSelling : v.selling_price,
             available_stock: avail,
             is_bundle: v.is_bundle ?? false,
             bundle_components: v.bundle_components ?? [],
         };
     }
 
-    async function fetchVariants(query: string, targetSellerId?: number | null) {
+    async function fetchVariants(
+        query: string,
+        targetSellerId?: number | null,
+    ) {
         isSearchingVariants = true;
         try {
             const params = new URLSearchParams();
@@ -395,7 +586,10 @@
         }
     }
 
-    function onVariantSearchInput(query: string, targetSellerId?: number | null) {
+    function onVariantSearchInput(
+        query: string,
+        targetSellerId?: number | null,
+    ) {
         variantSearchQuery = query;
         if (searchDebounceTimeout) clearTimeout(searchDebounceTimeout);
         searchDebounceTimeout = setTimeout(() => {
@@ -403,11 +597,15 @@
         }, 250);
     }
 
-    function openVariantSelector(index: number, targetSellerId?: number | null) {
+    function openVariantSelector(
+        index: number,
+        targetSellerId?: number | null,
+        initialQuery: string = "",
+    ) {
         editingVariantIndex = index;
-        variantSearchQuery = "";
+        variantSearchQuery = initialQuery;
         searchResults = [];
-        fetchVariants("", targetSellerId);
+        fetchVariants(initialQuery, targetSellerId);
     }
 
     function setBulkKonveksiForSeller(sellerId: number, konveksiId: number) {
@@ -508,10 +706,18 @@
         missingSkusList.filter(
             (m) =>
                 !missingSearchQuery.trim() ||
-                (m.sku || "").toLowerCase().includes(missingSearchQuery.toLowerCase()) ||
-                (m.product_name || "").toLowerCase().includes(missingSearchQuery.toLowerCase()) ||
-                (m.sizes || []).some((sz) => sz.toLowerCase().includes(missingSearchQuery.toLowerCase())) ||
-                (m.variation || "").toLowerCase().includes(missingSearchQuery.toLowerCase()),
+                (m.sku || "")
+                    .toLowerCase()
+                    .includes(missingSearchQuery.toLowerCase()) ||
+                (m.product_name || "")
+                    .toLowerCase()
+                    .includes(missingSearchQuery.toLowerCase()) ||
+                (m.sizes || []).some((sz) =>
+                    sz.toLowerCase().includes(missingSearchQuery.toLowerCase()),
+                ) ||
+                (m.variation || "")
+                    .toLowerCase()
+                    .includes(missingSearchQuery.toLowerCase()),
         ),
     );
 
@@ -534,7 +740,10 @@
         const text = missingSkusList
             .map((m) => {
                 if (!m.sku) return null;
-                const sizesStr = m.sizes && m.sizes.length > 0 ? m.sizes.join(", ") : (m.variation || "");
+                const sizesStr =
+                    m.sizes && m.sizes.length > 0
+                        ? m.sizes.join(", ")
+                        : m.variation || "";
                 return sizesStr ? `${m.sku} (Size: ${sizesStr})` : m.sku;
             })
             .filter(Boolean)
@@ -548,8 +757,14 @@
         if (missingSkusList.length === 0) return;
         const text = missingSkusList
             .map((m, idx) => {
-                const sizesStr = m.sizes && m.sizes.length > 0 ? m.sizes.join(", ") : (m.variation || "-");
-                const multiTag = (m.sizes && m.sizes.length > 1) || m.has_multiple_sizes ? ` [${m.sizes?.length ?? 2} UKURAN]` : "";
+                const sizesStr =
+                    m.sizes && m.sizes.length > 0
+                        ? m.sizes.join(", ")
+                        : m.variation || "-";
+                const multiTag =
+                    (m.sizes && m.sizes.length > 1) || m.has_multiple_sizes
+                        ? ` [${m.sizes?.length ?? 2} UKURAN]`
+                        : "";
                 return `${idx + 1}. SKU: ${m.sku}${multiTag} | Ukuran: [${sizesStr}] | Produk: ${m.product_name || "-"}`;
             })
             .join("\n");
@@ -578,7 +793,10 @@
     }
 
     async function copySkuWithSizes(m: MissingSkuItem) {
-        const sizesStr = m.sizes && m.sizes.length > 0 ? m.sizes.join(", ") : (m.variation || "");
+        const sizesStr =
+            m.sizes && m.sizes.length > 0
+                ? m.sizes.join(", ")
+                : m.variation || "";
         const text = `${m.sku} (Size: ${sizesStr})`;
         await navigator.clipboard.writeText(text);
         copiedRowKey = m.sku + "_info";
@@ -589,7 +807,9 @@
 
     async function handleJsonFileUpload(event: Event) {
         if (!warehouseId || !sellerId) {
-            alert("Silakan pilih 1. Gudang Asal dan 2. Mitra Seller terlebih dahulu sebelum mengunggah file JSON!");
+            alert(
+                "Silakan pilih 1. Gudang Asal dan 2. Mitra Seller terlebih dahulu sebelum mengunggah file JSON!",
+            );
             const input = event.target as HTMLInputElement;
             input.value = "";
             return;
@@ -622,7 +842,10 @@
             try {
                 parsedJson = JSON.parse(fileText);
             } catch (parseErr: any) {
-                throw new Error("File yang diunggah bukan format JSON yang valid: " + parseErr.message);
+                throw new Error(
+                    "File yang diunggah bukan format JSON yang valid: " +
+                        parseErr.message,
+                );
             }
 
             // 2. Ekstrak array pesanan & metadata
@@ -640,7 +863,10 @@
                     allRawItems = parsedJson.rows;
                 }
 
-                if (parsedJson.bruto !== undefined && parsedJson.bruto !== null) {
+                if (
+                    parsedJson.bruto !== undefined &&
+                    parsedJson.bruto !== null
+                ) {
                     bruto = Number(parsedJson.bruto);
                     fileSuggestedBruto = Number(parsedJson.bruto);
                 }
@@ -650,7 +876,10 @@
                     parsedJson.total_master_amount ??
                     parsedJson.total_payment ??
                     null;
-                if (suggestedPencairan !== null && suggestedPencairan !== undefined) {
+                if (
+                    suggestedPencairan !== null &&
+                    suggestedPencairan !== undefined
+                ) {
                     fileSuggestedPencairan = Number(suggestedPencairan);
                 }
                 const expectedQty =
@@ -663,44 +892,180 @@
             }
 
             if (allRawItems.length === 0) {
-                throw new Error("Data pesanan kosong atau file JSON tidak memiliki array data/orders/items.");
+                throw new Error(
+                    "Data pesanan kosong atau file JSON tidak memiliki array data/orders/items.",
+                );
             }
 
             importTotalItems = allRawItems.length;
 
-            // 3. Chunking: potong per batch (60 baris) agar payload tiap request sangat ringan (~15-20 KB)
-            // Ini menjamin request tidak akan pernah terblokir ModSecurity / WAF hosting (403 Forbidden)
-            const CHUNK_SIZE = 60;
-            const totalChunks = Math.ceil(allRawItems.length / CHUNK_SIZE);
+            // 3. Pre-aggregate identik baris pesanan & ekstrak Resi di browser sebelum dikirim ke server!
+            // Ini memangkas ribuan baris pesanan berulang menjadi hanya beberapa puluh SKU+Variasi unik,
+            // sekaligus tetap menjaga chunk berukuran aman agar tidak pernah kena blokir WAF / ModSecurity (403).
+            const resiMap = new Map<string, any>();
+            const aggregatedRawMap = new Map<string, any>();
+
+            for (const rawItem of allRawItems) {
+                if (!rawItem || typeof rawItem !== "object") continue;
+
+                const orderId = String(
+                    rawItem["No. Pesanan"] ??
+                        rawItem["Order ID"] ??
+                        rawItem["order_id"] ??
+                        "",
+                ).trim();
+                const resi = String(
+                    rawItem["No. Resi"] ??
+                        rawItem["Tracking ID"] ??
+                        rawItem["resi"] ??
+                        "",
+                ).trim();
+                const rawSku = String(
+                    rawItem["Nomor Referensi SKU"] ??
+                        rawItem["Seller SKU"] ??
+                        rawItem["SKU Induk"] ??
+                        rawItem["sku"] ??
+                        "",
+                ).trim();
+                const variantName = String(
+                    rawItem["Nama Variasi"] ?? rawItem["Variation"] ?? "",
+                ).trim();
+                const productName = String(
+                    rawItem["Nama Produk"] ?? rawItem["Product Name"] ?? "",
+                ).trim();
+
+                const qtyParsed = parseInt(
+                    String(
+                        rawItem["Jumlah"] ??
+                            rawItem["Quantity"] ??
+                            rawItem["Qty"] ??
+                            1,
+                    ),
+                    10,
+                );
+                const qty = isNaN(qtyParsed) ? 1 : qtyParsed;
+
+                const rawPayStr = String(
+                    rawItem["Total Pembayaran"] ??
+                        rawItem["Subtotal Pesanan"] ??
+                        0,
+                ).replace(/Rp|\.|\s/g, "");
+                const paymentAmt = parseFloat(rawPayStr) || 0;
+
+                if (orderId || resi) {
+                    const rKey = orderId || resi;
+                    if (!resiMap.has(rKey)) {
+                        resiMap.set(rKey, {
+                            order_id: orderId,
+                            no_resi: resi,
+                            payment: 0,
+                        });
+                    }
+                    const existingResi = resiMap.get(rKey);
+                    existingResi.payment = Number(
+                        (existingResi.payment + paymentAmt).toFixed(2),
+                    );
+                    if (resi && !existingResi.no_resi) {
+                        existingResi.no_resi = resi;
+                    }
+                }
+
+                if (!rawSku) continue;
+
+                const aggKey = `${rawSku.toUpperCase()}|||${variantName.toUpperCase()}`;
+                if (!aggregatedRawMap.has(aggKey)) {
+                    aggregatedRawMap.set(aggKey, {
+                        "Nomor Referensi SKU": rawSku,
+                        "Nama Variasi": variantName,
+                        "Nama Produk": productName,
+                        Jumlah: qty,
+                        "Total Pembayaran": Number(paymentAmt.toFixed(2)),
+                        _orders: orderId ? [orderId] : [],
+                        _order_count: 1,
+                    });
+                } else {
+                    const existingAgg = aggregatedRawMap.get(aggKey);
+                    existingAgg["Jumlah"] += qty;
+                    existingAgg["Total Pembayaran"] = Number(
+                        (existingAgg["Total Pembayaran"] + paymentAmt).toFixed(
+                            2,
+                        ),
+                    );
+                    existingAgg._order_count += 1;
+                    if (
+                        orderId &&
+                        existingAgg._orders.length < 50 &&
+                        !existingAgg._orders.includes(orderId)
+                    ) {
+                        existingAgg._orders.push(orderId);
+                    }
+                    if (!existingAgg["Nama Produk"] && productName) {
+                        existingAgg["Nama Produk"] = productName;
+                    }
+                }
+            }
+
+            const itemsToProcess = Array.from(aggregatedRawMap.values());
+            const CHUNK_SIZE = 80;
+            const totalChunks = Math.max(
+                1,
+                Math.ceil(itemsToProcess.length / CHUNK_SIZE),
+            );
             importTotalChunks = totalChunks;
 
             const accumulatedMatchedItems: FormItem[] = [];
             const missingMap = new Map<string, any>();
-            const resiMap = new Map<string, any>();
 
-            for (let c = 0; c < totalChunks; c++) {
-                importCurrentChunk = c + 1;
+            // Kirim dengan paralelisme terkontrol (maks 2 chunk bersamaan) agar sangat cepat & tetap aman dari WAF
+            const CONCURRENCY = 2;
+            let completedChunks = 0;
+
+            async function processSingleChunk(c: number) {
                 const chunkStart = c * CHUNK_SIZE;
-                const chunkEnd = Math.min(chunkStart + CHUNK_SIZE, allRawItems.length);
-                const chunkItems = allRawItems.slice(chunkStart, chunkEnd);
+                const chunkEnd = Math.min(
+                    chunkStart + CHUNK_SIZE,
+                    itemsToProcess.length,
+                );
+                const chunkItems = itemsToProcess.slice(chunkStart, chunkEnd);
+                if (chunkItems.length === 0) return null;
 
-                importProgress = Math.round((c / totalChunks) * 85) + 5;
-                importStatusText = `Mengirim batch ${c + 1} dari ${totalChunks} (${chunkItems.length} pesanan)...`;
-
-                const response = await fetch("/superadmin/warehouse/stock-out/import-chunked", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        "Accept": "application/json",
-                        "X-Requested-With": "XMLHttpRequest",
-                        "X-CSRF-TOKEN": getCsrfHeader(),
-                    },
-                    body: JSON.stringify({
-                        items: chunkItems,
-                        warehouse_id: Number(warehouseId),
-                        seller_id: Number(sellerId),
-                    }),
+                // Buat meta map untuk memulihkan order_count dan daftar orders jika ada SKU yang missing
+                const chunkMetaMap = new Map<
+                    string,
+                    { orderCount: number; orders: string[] }
+                >();
+                const payloadChunk = chunkItems.map((ci) => {
+                    const k = `${String(ci["Nomor Referensi SKU"]).toUpperCase()}|||${String(ci["Nama Variasi"]).toUpperCase()}`;
+                    chunkMetaMap.set(k, {
+                        orderCount: ci._order_count || 1,
+                        orders: ci._orders || [],
+                    });
+                    return {
+                        "Nomor Referensi SKU": ci["Nomor Referensi SKU"],
+                        "Nama Variasi": ci["Nama Variasi"],
+                        "Nama Produk": ci["Nama Produk"],
+                        Jumlah: ci["Jumlah"],
+                        "Total Pembayaran": ci["Total Pembayaran"],
+                    };
                 });
+
+                const response = await fetch(
+                    "/superadmin/warehouse/stock-out/import-chunked",
+                    {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            Accept: "application/json",
+                            "X-Requested-With": "XMLHttpRequest",
+                            "X-CSRF-TOKEN": getCsrfHeader(),
+                        },
+                        body: JSON.stringify({
+                            items: payloadChunk,
+                            warehouse_id: Number(warehouseId),
+                            seller_id: Number(sellerId),
+                        }),
+                    },
+                );
 
                 const resText = await response.text();
                 let resData: any;
@@ -709,98 +1074,180 @@
                 } catch (parseErr) {
                     console.error("Respon bukan JSON:", resText);
                     if (response.status === 403) {
-                        throw new Error("Akses ditolak (HTTP 403 Forbidden). Firewall server/ModSecurity memblokir request.");
+                        throw new Error(
+                            "Akses ditolak (HTTP 403 Forbidden). Firewall server/ModSecurity memblokir request.",
+                        );
                     }
                     if (response.status === 419) {
-                        throw new Error("Sesi browser kedaluwarsa (419). Silakan refresh halaman.");
+                        throw new Error(
+                            "Sesi browser kedaluwarsa (419). Silakan refresh halaman.",
+                        );
                     }
-                    throw new Error(`Server mengembalikan status HTTP ${response.status}`);
+                    throw new Error(
+                        `Server mengembalikan status HTTP ${response.status}`,
+                    );
                 }
 
                 if (!resData.success) {
-                    throw new Error(resData.message || `Gagal memproses batch ke-${c + 1}`);
+                    throw new Error(
+                        resData.message || `Gagal memproses batch ke-${c + 1}`,
+                    );
                 }
 
-                // Akumulasi Matched Items
-                if (Array.isArray(resData.matched_items)) {
-                    resData.matched_items.forEach((m: any) => {
-                        accumulatedMatchedItems.push({
-                            product_variant_id: m.product_variant_id,
-                            konveksi_id: null,
-                            seller_id: m.seller_id || Number(sellerId),
-                            seller_name: m.seller_name || (sellers.find((s) => s.id === Number(sellerId))?.seller_name ?? "Mitra"),
-                            sku: m.sku,
-                            product_name: m.product_name,
-                            size: m.size,
-                            color: m.color,
-                            qty: m.qty,
-                            price: Number(m.price || 0),
-                            selling_price: Number(Number(m.selling_price || 0).toFixed(2)),
-                            available_stock: m.available_stock,
-                            is_bundle: m.is_bundle ?? false,
-                            bundle_components: m.bundle_components ?? [],
-                        });
-                    });
-                }
+                completedChunks++;
+                importCurrentChunk = completedChunks;
+                importProgress =
+                    Math.round((completedChunks / totalChunks) * 85) + 5;
+                importStatusText = `Memproses batch ${completedChunks} dari ${totalChunks} (${importTotalItems} pesanan)...`;
 
-                // Akumulasi Missing SKUs
-                if (Array.isArray(resData.missing_skus)) {
-                    resData.missing_skus.forEach((m: any) => {
-                        const key = (m.sku || "").toUpperCase();
-                        if (!missingMap.has(key)) {
-                            missingMap.set(key, { ...m });
-                        } else {
-                            const existing = missingMap.get(key);
-                            existing.total_qty = (existing.total_qty || 0) + (m.total_qty || 0);
-                            existing.total_payment = Number(((existing.total_payment || 0) + (m.total_payment || 0)).toFixed(2));
-                            existing.order_count = (existing.order_count || 0) + (m.order_count || 0);
-                            if (Array.isArray(m.orders)) {
-                                existing.orders = Array.from(new Set([...(existing.orders || []), ...m.orders]));
-                            }
-                            if (Array.isArray(m.variations)) {
-                                existing.variations = Array.from(new Set([...(existing.variations || []), ...m.variations]));
-                                existing.variation = existing.variations.join(", ");
-                            }
-                            if (Array.isArray(m.sizes)) {
-                                existing.sizes = Array.from(new Set([...(existing.sizes || []), ...m.sizes]));
-                                existing.sizes_count = existing.sizes.length;
-                                existing.has_multiple_sizes = existing.sizes.length > 1;
-                            }
-                            if (Array.isArray(m.missing_parts)) {
-                                existing.missing_parts = Array.from(new Set([...(existing.missing_parts || []), ...m.missing_parts]));
-                            }
-                        }
-                    });
-                }
+                return { resData, chunkItems };
+            }
 
-                // Akumulasi Resi
-                if (Array.isArray(resData.resis)) {
-                    resData.resis.forEach((r: any) => {
-                        const rKey = (r.order_id || r.no_resi || "").trim();
-                        if (!rKey) return;
-                        if (!resiMap.has(rKey)) {
-                            resiMap.set(rKey, {
-                                order_id: r.order_id,
-                                no_resi: r.no_resi,
-                                payment: Number(r.payment || 0),
+            for (let i = 0; i < totalChunks; i += CONCURRENCY) {
+                const batchPromises: Array<
+                    Promise<{ resData: any; chunkItems: any[] } | null>
+                > = [];
+                for (
+                    let j = i;
+                    j < Math.min(i + CONCURRENCY, totalChunks);
+                    j++
+                ) {
+                    batchPromises.push(processSingleChunk(j));
+                }
+                const results = await Promise.all(batchPromises);
+
+                // Akumulasi hasil dari batch ini
+                for (const r of results) {
+                    if (!r) continue;
+                    const { resData, chunkItems } = r;
+
+                    if (Array.isArray(resData.matched_items)) {
+                        resData.matched_items.forEach((m: any) => {
+                            accumulatedMatchedItems.push({
+                                product_variant_id: m.product_variant_id,
+                                konveksi_id: null,
+                                seller_id: m.seller_id || Number(sellerId),
+                                seller_name:
+                                    m.seller_name ||
+                                    (sellers.find(
+                                        (s) => s.id === Number(sellerId),
+                                    )?.seller_name ??
+                                        "Mitra"),
+                                sku: m.sku,
+                                product_name: m.product_name,
+                                size: m.size,
+                                color: m.color,
+                                qty: m.qty,
+                                price: Number(m.price || 0),
+                                selling_price: Number(
+                                    Number(m.selling_price || 0).toFixed(2),
+                                ),
+                                available_stock: m.available_stock,
+                                is_bundle: m.is_bundle ?? false,
+                                bundle_components: m.bundle_components ?? [],
                             });
-                        } else {
-                            const existing = resiMap.get(rKey);
-                            existing.payment = Number(((existing.payment || 0) + (r.payment || 0)).toFixed(2));
-                            if (r.no_resi && !existing.no_resi) {
-                                existing.no_resi = r.no_resi;
-                            }
-                        }
-                    });
-                }
+                        });
+                    }
 
-                importMatchedCount = accumulatedMatchedItems.length;
-                importMissingCount = missingMap.size;
+                    if (Array.isArray(resData.missing_skus)) {
+                        resData.missing_skus.forEach((m: any) => {
+                            const key = (m.sku || "").toUpperCase().trim();
+                            // Hitung total order_count asli dari pre-aggregated items untuk SKU ini
+                            const matchingPreAgg = chunkItems.filter(
+                                (ci) =>
+                                    String(ci["Nomor Referensi SKU"])
+                                        .toUpperCase()
+                                        .trim() === key,
+                            );
+                            const realOrderCount =
+                                matchingPreAgg.reduce(
+                                    (sum, ci) => sum + (ci._order_count || 1),
+                                    0,
+                                ) ||
+                                m.order_count ||
+                                1;
+                            const realOrders = Array.from(
+                                new Set(
+                                    matchingPreAgg.flatMap(
+                                        (ci) => ci._orders || [],
+                                    ),
+                                ),
+                            );
+
+                            if (!missingMap.has(key)) {
+                                missingMap.set(key, {
+                                    ...m,
+                                    order_count: realOrderCount,
+                                    orders:
+                                        realOrders.length > 0
+                                            ? realOrders
+                                            : m.orders || [],
+                                });
+                            } else {
+                                const existing = missingMap.get(key);
+                                existing.total_qty =
+                                    (existing.total_qty || 0) +
+                                    (m.total_qty || 0);
+                                existing.total_payment = Number(
+                                    (
+                                        (existing.total_payment || 0) +
+                                        (m.total_payment || 0)
+                                    ).toFixed(2),
+                                );
+                                existing.order_count =
+                                    (existing.order_count || 0) +
+                                    realOrderCount;
+                                if (realOrders.length > 0) {
+                                    existing.orders = Array.from(
+                                        new Set([
+                                            ...(existing.orders || []),
+                                            ...realOrders,
+                                        ]),
+                                    );
+                                }
+                                if (Array.isArray(m.variations)) {
+                                    existing.variations = Array.from(
+                                        new Set([
+                                            ...(existing.variations || []),
+                                            ...m.variations,
+                                        ]),
+                                    );
+                                    existing.variation =
+                                        existing.variations.join(", ");
+                                }
+                                if (Array.isArray(m.sizes)) {
+                                    existing.sizes = Array.from(
+                                        new Set([
+                                            ...(existing.sizes || []),
+                                            ...m.sizes,
+                                        ]),
+                                    );
+                                    existing.sizes_count =
+                                        existing.sizes.length;
+                                    existing.has_multiple_sizes =
+                                        existing.sizes.length > 1;
+                                }
+                                if (Array.isArray(m.missing_parts)) {
+                                    existing.missing_parts = Array.from(
+                                        new Set([
+                                            ...(existing.missing_parts || []),
+                                            ...m.missing_parts,
+                                        ]),
+                                    );
+                                }
+                            }
+                        });
+                    }
+
+                    importMatchedCount = accumulatedMatchedItems.length;
+                    importMissingCount = missingMap.size;
+                }
             }
 
             // 4. Selesai semua chunk, konsolidasikan item
             importProgress = 95;
-            importStatusText = "Menyusun dan mengonsolidasikan item barang keluar...";
+            importStatusText =
+                "Menyusun dan mengonsolidasikan item barang keluar...";
 
             formItems = consolidateFormItems(accumulatedMatchedItems);
             missingSkusList = Array.from(missingMap.values());
@@ -816,7 +1263,10 @@
             }, 600);
         } catch (err: any) {
             console.error("Import error:", err);
-            alert("Terjadi kesalahan saat memproses file JSON: " + (err?.message || "Koneksi bermasalah"));
+            alert(
+                "Terjadi kesalahan saat memproses file JSON: " +
+                    (err?.message || "Koneksi bermasalah"),
+            );
         } finally {
             isImporting = false;
             input.value = "";
@@ -861,12 +1311,17 @@
         hasResiPayments ? totalResiPayment : itemsTotalSelling,
     );
     let liveBruto = $derived(bruto > 0 ? bruto : liveTotalSelling);
-    let liveMarketplaceFees = $derived(Math.max(0, liveBruto - liveTotalSelling));
+    let liveMarketplaceFees = $derived(
+        Math.max(0, liveBruto - liveTotalSelling),
+    );
     let liveEstProfit = $derived(liveTotalSelling - liveTotalHpp);
 
     // Discrepancy & Missing Tracking
     let totalMissingAmount = $derived(
-        missingSkusList.reduce((acc, m) => acc + (Number(m.total_payment) || 0), 0),
+        missingSkusList.reduce(
+            (acc, m) => acc + (Number(m.total_payment) || 0),
+            0,
+        ),
     );
     let filePencairanDiff = $derived(
         fileSuggestedPencairan && fileSuggestedPencairan > 0
@@ -899,7 +1354,7 @@
                     item,
                     avail,
                     qtyOut,
-                    diff: diff > 0 ? diff : (isZero ? qtyOut : 0),
+                    diff: diff > 0 ? diff : isZero ? qtyOut : 0,
                     isZero,
                     isDeficit: diff > 0 || isZero,
                 };
@@ -908,14 +1363,20 @@
     );
 
     function getCsrfHeader(): string {
-        const meta = (document.querySelector('meta[name="csrf-token"]') as HTMLMetaElement)?.content;
+        const meta = (
+            document.querySelector('meta[name="csrf-token"]') as HTMLMetaElement
+        )?.content;
         if (meta) return meta;
         const cookieMatch = document.cookie.match(/XSRF-TOKEN=([^;]+)/);
         if (cookieMatch) return decodeURIComponent(cookieMatch[1]);
         return "";
     }
 
-    async function handleQuickAdjustSingle(variantId: number, addQty: number, itemIndex: number) {
+    async function handleQuickAdjustSingle(
+        variantId: number,
+        addQty: number,
+        itemIndex: number,
+    ) {
         if (!warehouseId) {
             alert("Harap tentukan 1. Gudang Asal terlebih dahulu di atas!");
             return;
@@ -927,20 +1388,23 @@
 
         adjustingVariantId = variantId;
         try {
-            const res = await fetch("/superadmin/warehouse/stock-out/quick-adjust-stock", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    Accept: "application/json",
-                    "X-Requested-With": "XMLHttpRequest",
-                    "X-CSRF-TOKEN": getCsrfHeader(),
+            const res = await fetch(
+                "/superadmin/warehouse/stock-out/quick-adjust-stock",
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        Accept: "application/json",
+                        "X-Requested-With": "XMLHttpRequest",
+                        "X-CSRF-TOKEN": getCsrfHeader(),
+                    },
+                    body: JSON.stringify({
+                        warehouse_id: Number(warehouseId),
+                        variant_id: variantId,
+                        add_qty: addQty,
+                    }),
                 },
-                body: JSON.stringify({
-                    warehouse_id: Number(warehouseId),
-                    variant_id: variantId,
-                    add_qty: addQty,
-                }),
-            });
+            );
 
             const text = await res.text();
             let data: any;
@@ -949,7 +1413,9 @@
             } catch (err) {
                 console.error("Non-JSON response:", text);
                 if (res.status === 419) {
-                    alert("Sesi browser kedaluwarsa (419). Harap refresh halaman terlebih dahulu.");
+                    alert(
+                        "Sesi browser kedaluwarsa (419). Harap refresh halaman terlebih dahulu.",
+                    );
                     return;
                 }
                 alert(`Gagal (HTTP ${res.status}): ${text.substring(0, 120)}`);
@@ -965,7 +1431,10 @@
                         return {
                             ...fi,
                             available_stock: data.new_stock,
-                            bundle_components: isBundle && bundleComponents ? bundleComponents : fi.bundle_components,
+                            bundle_components:
+                                isBundle && bundleComponents
+                                    ? bundleComponents
+                                    : fi.bundle_components,
                         };
                     }
                     return fi;
@@ -978,7 +1447,10 @@
                                 ...v.stocks,
                                 [Number(warehouseId)]: data.new_stock,
                             },
-                            bundle_components: isBundle && bundleComponents ? bundleComponents : v.bundle_components,
+                            bundle_components:
+                                isBundle && bundleComponents
+                                    ? bundleComponents
+                                    : v.bundle_components,
                         };
                     }
                     return v;
@@ -990,13 +1462,20 @@
             }
         } catch (e: any) {
             console.error("Quick adjust error:", e);
-            alert("Terjadi kesalahan saat menambahkan stok: " + (e?.message || "Koneksi bermasalah"));
+            alert(
+                "Terjadi kesalahan saat menambahkan stok: " +
+                    (e?.message || "Koneksi bermasalah"),
+            );
         } finally {
             adjustingVariantId = null;
         }
     }
 
-    async function handleQuickAdjustComponent(compVariantId: number, addQty: number, itemIndex: number) {
+    async function handleQuickAdjustComponent(
+        compVariantId: number,
+        addQty: number,
+        itemIndex: number,
+    ) {
         if (!warehouseId) {
             alert("Harap tentukan 1. Gudang Asal terlebih dahulu di atas!");
             return;
@@ -1008,20 +1487,23 @@
 
         adjustingVariantId = compVariantId;
         try {
-            const res = await fetch("/superadmin/warehouse/stock-out/quick-adjust-stock", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    Accept: "application/json",
-                    "X-Requested-With": "XMLHttpRequest",
-                    "X-CSRF-TOKEN": getCsrfHeader(),
+            const res = await fetch(
+                "/superadmin/warehouse/stock-out/quick-adjust-stock",
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        Accept: "application/json",
+                        "X-Requested-With": "XMLHttpRequest",
+                        "X-CSRF-TOKEN": getCsrfHeader(),
+                    },
+                    body: JSON.stringify({
+                        warehouse_id: Number(warehouseId),
+                        variant_id: compVariantId,
+                        add_qty: addQty,
+                    }),
                 },
-                body: JSON.stringify({
-                    warehouse_id: Number(warehouseId),
-                    variant_id: compVariantId,
-                    add_qty: addQty,
-                }),
-            });
+            );
 
             const text = await res.text();
             let data: any;
@@ -1030,7 +1512,9 @@
             } catch (err) {
                 console.error("Non-JSON response:", text);
                 if (res.status === 419) {
-                    alert("Sesi browser kedaluwarsa (419). Harap refresh halaman terlebih dahulu.");
+                    alert(
+                        "Sesi browser kedaluwarsa (419). Harap refresh halaman terlebih dahulu.",
+                    );
                     return;
                 }
                 alert(`Gagal (HTTP ${res.status}): ${text.substring(0, 120)}`);
@@ -1040,17 +1524,30 @@
             if (res.ok && data.success) {
                 // Update the component's available stock across all bundle items and localVariants
                 formItems = formItems.map((fi) => {
-                    if (fi.is_bundle && fi.bundle_components && fi.bundle_components.length > 0) {
+                    if (
+                        fi.is_bundle &&
+                        fi.bundle_components &&
+                        fi.bundle_components.length > 0
+                    ) {
                         const newComps = fi.bundle_components.map((c) => {
                             if (c.component_variant_id === compVariantId) {
-                                return { ...c, available_stock: data.new_stock };
+                                return {
+                                    ...c,
+                                    available_stock: data.new_stock,
+                                };
                             }
                             return c;
                         });
                         const possibleList = newComps.map((c) =>
-                            Math.floor((c.available_stock || 0) / Math.max(1, c.quantity || 1))
+                            Math.floor(
+                                (c.available_stock || 0) /
+                                    Math.max(1, c.quantity || 1),
+                            ),
                         );
-                        const newBundleStock = possibleList.length > 0 ? Math.min(...possibleList) : 0;
+                        const newBundleStock =
+                            possibleList.length > 0
+                                ? Math.min(...possibleList)
+                                : 0;
                         return {
                             ...fi,
                             bundle_components: newComps,
@@ -1076,14 +1573,19 @@
                     return v;
                 });
 
-                adjustSuccessToast = data.message || `Berhasil menambahkan ${addQty} pcs stok komponen.`;
+                adjustSuccessToast =
+                    data.message ||
+                    `Berhasil menambahkan ${addQty} pcs stok komponen.`;
                 setTimeout(() => (adjustSuccessToast = null), 3500);
             } else {
                 alert(data.message || "Gagal menambahkan stok komponen.");
             }
         } catch (err: any) {
             console.error("Quick adjust component error:", err);
-            alert("Terjadi kesalahan saat menyesuaikan stok komponen: " + (err?.message || "Koneksi bermasalah"));
+            alert(
+                "Terjadi kesalahan saat menyesuaikan stok komponen: " +
+                    (err?.message || "Koneksi bermasalah"),
+            );
         } finally {
             adjustingVariantId = null;
         }
@@ -1100,14 +1602,27 @@
         const payloadMap = new Map<number, number>();
 
         for (const d of deficitItems) {
-            if (d.item.is_bundle && d.item.bundle_components && d.item.bundle_components.length > 0) {
+            if (
+                d.item.is_bundle &&
+                d.item.bundle_components &&
+                d.item.bundle_components.length > 0
+            ) {
                 for (const comp of d.item.bundle_components) {
                     const reqForBundle = (comp.quantity || 1) * d.qtyOut;
-                    const compDeficit = Math.max(0, reqForBundle - (comp.available_stock || 0));
-                    const manualAdd = adjustInputMap[comp.component_variant_id] ?? compDeficit;
+                    const compDeficit = Math.max(
+                        0,
+                        reqForBundle - (comp.available_stock || 0),
+                    );
+                    const manualAdd =
+                        adjustInputMap[comp.component_variant_id] ??
+                        compDeficit;
                     if (manualAdd > 0) {
-                        const current = payloadMap.get(comp.component_variant_id) ?? 0;
-                        payloadMap.set(comp.component_variant_id, Math.max(current, manualAdd));
+                        const current =
+                            payloadMap.get(comp.component_variant_id) ?? 0;
+                        payloadMap.set(
+                            comp.component_variant_id,
+                            Math.max(current, manualAdd),
+                        );
                     }
                 }
             } else if (d.item.product_variant_id) {
@@ -1115,32 +1630,40 @@
                     adjustInputMap[d.item.product_variant_id] ??
                     (d.diff > 0 ? d.diff : d.qtyOut);
                 const current = payloadMap.get(d.item.product_variant_id) ?? 0;
-                payloadMap.set(d.item.product_variant_id, Math.max(current, manualAdd));
+                payloadMap.set(
+                    d.item.product_variant_id,
+                    Math.max(current, manualAdd),
+                );
             }
         }
 
-        const payloadItems = Array.from(payloadMap.entries()).map(([variant_id, add_qty]) => ({
-            variant_id,
-            add_qty: Math.max(1, add_qty),
-        }));
+        const payloadItems = Array.from(payloadMap.entries()).map(
+            ([variant_id, add_qty]) => ({
+                variant_id,
+                add_qty: Math.max(1, add_qty),
+            }),
+        );
 
         if (payloadItems.length === 0) return;
 
         isAdjustingAll = true;
         try {
-            const res = await fetch("/superadmin/warehouse/stock-out/quick-adjust-stock-bulk", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    Accept: "application/json",
-                    "X-Requested-With": "XMLHttpRequest",
-                    "X-CSRF-TOKEN": getCsrfHeader(),
+            const res = await fetch(
+                "/superadmin/warehouse/stock-out/quick-adjust-stock-bulk",
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        Accept: "application/json",
+                        "X-Requested-With": "XMLHttpRequest",
+                        "X-CSRF-TOKEN": getCsrfHeader(),
+                    },
+                    body: JSON.stringify({
+                        warehouse_id: Number(warehouseId),
+                        items: payloadItems,
+                    }),
                 },
-                body: JSON.stringify({
-                    warehouse_id: Number(warehouseId),
-                    items: payloadItems,
-                }),
-            });
+            );
 
             const text = await res.text();
             let data: any;
@@ -1149,7 +1672,9 @@
             } catch (err) {
                 console.error("Non-JSON response:", text);
                 if (res.status === 419) {
-                    alert("Sesi browser kedaluwarsa (419). Harap refresh halaman terlebih dahulu.");
+                    alert(
+                        "Sesi browser kedaluwarsa (419). Harap refresh halaman terlebih dahulu.",
+                    );
                     return;
                 }
                 alert(`Gagal (HTTP ${res.status}): ${text.substring(0, 120)}`);
@@ -1162,7 +1687,11 @@
 
                 formItems = formItems.map((fi) => {
                     // If regular variant
-                    if (fi.product_variant_id && stockMap[fi.product_variant_id] !== undefined && !fi.is_bundle) {
+                    if (
+                        fi.product_variant_id &&
+                        stockMap[fi.product_variant_id] !== undefined &&
+                        !fi.is_bundle
+                    ) {
                         return {
                             ...fi,
                             available_stock: stockMap[fi.product_variant_id],
@@ -1171,20 +1700,35 @@
                     // If bundle variant
                     if (fi.is_bundle && fi.bundle_components) {
                         let newComps = fi.bundle_components.map((c) => {
-                            if (stockMap[c.component_variant_id] !== undefined) {
-                                return { ...c, available_stock: stockMap[c.component_variant_id] };
+                            if (
+                                stockMap[c.component_variant_id] !== undefined
+                            ) {
+                                return {
+                                    ...c,
+                                    available_stock:
+                                        stockMap[c.component_variant_id],
+                                };
                             }
                             return c;
                         });
-                        if (fi.product_variant_id && bundleUpdates[fi.product_variant_id]) {
+                        if (
+                            fi.product_variant_id &&
+                            bundleUpdates[fi.product_variant_id]
+                        ) {
                             newComps = bundleUpdates[fi.product_variant_id];
                         }
                         const possibleList = newComps.map((c) =>
-                            Math.floor((c.available_stock || 0) / Math.max(1, c.quantity || 1))
+                            Math.floor(
+                                (c.available_stock || 0) /
+                                    Math.max(1, c.quantity || 1),
+                            ),
                         );
-                        const newBundleStock = stockMap[fi.product_variant_id!] !== undefined
-                            ? stockMap[fi.product_variant_id!]
-                            : (possibleList.length > 0 ? Math.min(...possibleList) : 0);
+                        const newBundleStock =
+                            stockMap[fi.product_variant_id!] !== undefined
+                                ? stockMap[fi.product_variant_id!]
+                                : possibleList.length > 0
+                                  ? Math.min(...possibleList)
+                                  : 0;
 
                         return {
                             ...fi,
@@ -1208,14 +1752,19 @@
                     return v;
                 });
 
-                adjustSuccessToast = data.message || `Berhasil memperbarui stok seluruh produk selisih.`;
+                adjustSuccessToast =
+                    data.message ||
+                    `Berhasil memperbarui stok seluruh produk selisih.`;
                 setTimeout(() => (adjustSuccessToast = null), 3500);
             } else {
                 alert(data.message || "Gagal menambahkan stok massal.");
             }
         } catch (e: any) {
             console.error("Bulk quick adjust error:", e);
-            alert("Terjadi kesalahan saat menambahkan stok massal: " + (e?.message || "Koneksi bermasalah"));
+            alert(
+                "Terjadi kesalahan saat menambahkan stok massal: " +
+                    (e?.message || "Koneksi bermasalah"),
+            );
         } finally {
             isAdjustingAll = false;
         }
@@ -1405,12 +1954,18 @@
         <div
             class="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm space-y-6"
         >
-            <div class="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
-                <h3 class="text-sm font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2">
+            <div
+                class="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3"
+            >
+                <h3
+                    class="text-sm font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2"
+                >
                     <Store class="w-4 h-4 text-rose-500" />
                     <span>Informasi Gudang & Pengeluaran</span>
                 </h3>
-                <span class="text-[11px] font-semibold px-2.5 py-1 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 rounded-lg">
+                <span
+                    class="text-[11px] font-semibold px-2.5 py-1 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 rounded-lg"
+                >
                     Langkah 1: Tentukan Asal & Mitra
                 </span>
             </div>
@@ -1418,7 +1973,9 @@
             <!-- Tier 1: 2 Kolom Lebar untuk Input Wajib Utama -->
             <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
                 <!-- 1. Gudang Asal * -->
-                <div class="p-4 rounded-xl bg-slate-50/70 dark:bg-slate-950/50 border border-slate-200/80 dark:border-slate-800/80 space-y-2">
+                <div
+                    class="p-4 rounded-xl bg-slate-50/70 dark:bg-slate-950/50 border border-slate-200/80 dark:border-slate-800/80 space-y-2"
+                >
                     <div class="flex items-center justify-between">
                         <label
                             for="warehouse-select"
@@ -1429,9 +1986,15 @@
                             <span class="text-rose-500">*</span>
                         </label>
                         {#if warehouseId}
-                            <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400">Terpilih</span>
+                            <span
+                                class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400"
+                                >Terpilih</span
+                            >
                         {:else}
-                            <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 dark:bg-amber-950/50 dark:text-amber-400">Wajib Dipilih</span>
+                            <span
+                                class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 dark:bg-amber-950/50 dark:text-amber-400"
+                                >Wajib Dipilih</span
+                            >
                         {/if}
                     </div>
                     <select
@@ -1445,12 +2008,15 @@
                         {/each}
                     </select>
                     <p class="text-[11px] text-slate-400 dark:text-slate-500">
-                        Lokasi fisik stok barang yang akan dikeluarkan / berkurang.
+                        Lokasi fisik stok barang yang akan dikeluarkan /
+                        berkurang.
                     </p>
                 </div>
 
                 <!-- 2. Mitra Seller * -->
-                <div class="p-4 rounded-xl bg-slate-50/70 dark:bg-slate-950/50 border border-slate-200/80 dark:border-slate-800/80 space-y-2">
+                <div
+                    class="p-4 rounded-xl bg-slate-50/70 dark:bg-slate-950/50 border border-slate-200/80 dark:border-slate-800/80 space-y-2"
+                >
                     <div class="flex items-center justify-between">
                         <label
                             for="seller-select"
@@ -1461,9 +2027,15 @@
                             <span class="text-rose-500">*</span>
                         </label>
                         {#if sellerId}
-                            <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400">Terpilih</span>
+                            <span
+                                class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400"
+                                >Terpilih</span
+                            >
                         {:else}
-                            <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 dark:bg-amber-950/50 dark:text-amber-400">Wajib Dipilih</span>
+                            <span
+                                class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 dark:bg-amber-950/50 dark:text-amber-400"
+                                >Wajib Dipilih</span
+                            >
                         {/if}
                     </div>
                     <select
@@ -1478,13 +2050,16 @@
                         {/each}
                     </select>
                     <p class="text-[11px] text-slate-400 dark:text-slate-500">
-                        Mitra pemilik produk yang akan memfilter daftar toko marketplace.
+                        Mitra pemilik produk yang akan memfilter daftar toko
+                        marketplace.
                     </p>
                 </div>
             </div>
 
             <!-- Tier 2: 3 Kolom untuk Detail Toko, Periode, Tanggal -->
-            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 pt-1">
+            <div
+                class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 pt-1"
+            >
                 <!-- Toko Marketplace (Opsional) - Terfilter berdasarkan sellerId -->
                 <div class="space-y-1.5">
                     <label
@@ -1493,7 +2068,9 @@
                     >
                         <span>Toko Marketplace (Opsional)</span>
                         {#if sellerId}
-                            <span class="text-[10px] font-normal text-slate-400">
+                            <span
+                                class="text-[10px] font-normal text-slate-400"
+                            >
                                 {filteredStores.length} toko tersedia
                             </span>
                         {/if}
@@ -1513,7 +2090,8 @@
                     </select>
                     {#if sellerId && filteredStores.length === 0}
                         <p class="text-[10px] text-amber-500">
-                            * Mitra ini belum memiliki toko marketplace yang ditautkan.
+                            * Mitra ini belum memiliki toko marketplace yang
+                            ditautkan.
                         </p>
                     {/if}
                 </div>
@@ -1534,7 +2112,8 @@
                         <option value="">-- Pilih Periode --</option>
                         {#each periods as p}
                             <option value={p.id}>
-                                {p.name} {p.is_active ? "(Aktif)" : ""}
+                                {p.name}
+                                {p.is_active ? "(Aktif)" : ""}
                             </option>
                         {/each}
                     </select>
@@ -1558,7 +2137,9 @@
             </div>
 
             <!-- Tier 3: Total Bruto & Catatan -->
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-slate-100 dark:border-slate-800">
+            <div
+                class="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-slate-100 dark:border-slate-800"
+            >
                 <!-- Total Bruto -->
                 <div class="space-y-1.5">
                     <label
@@ -1607,13 +2188,17 @@
                         class="text-sm font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2"
                     >
                         <Upload class="w-4 h-4 text-cyan-500" />
-                        <span>Import Cleaned Marketplace JSON (Shopee / TikTok Engine Output)</span>
+                        <span
+                            >Import Cleaned Marketplace JSON (Shopee / TikTok
+                            Engine Output)</span
+                        >
                     </h3>
                     {#if importedFileName}
                         <span
                             class="px-2.5 py-0.5 text-xs font-semibold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 rounded-full flex items-center gap-1"
                         >
-                            <Check class="w-3.5 h-3.5" /> File: {importedFileName} ({formItems.length} matched)
+                            <Check class="w-3.5 h-3.5" /> File: {importedFileName}
+                            ({formItems.length} matched)
                         </span>
                     {/if}
                 </div>
@@ -1631,11 +2216,18 @@
                                 <Lock class="w-6 h-6" />
                             </div>
                             <div class="max-w-md mx-auto space-y-1">
-                                <h4 class="text-xs font-extrabold text-amber-900 dark:text-amber-200">
+                                <h4
+                                    class="text-xs font-extrabold text-amber-900 dark:text-amber-200"
+                                >
                                     Upload File JSON Terkunci
                                 </h4>
-                                <p class="text-xs font-semibold text-amber-700 dark:text-amber-300">
-                                    Silakan pilih <strong>1. Gudang Asal</strong> dan <strong>2. Mitra Seller</strong> terlebih dahulu di atas sebelum mengunggah file JSON.
+                                <p
+                                    class="text-xs font-semibold text-amber-700 dark:text-amber-300"
+                                >
+                                    Silakan pilih <strong>1. Gudang Asal</strong
+                                    >
+                                    dan <strong>2. Mitra Seller</strong> terlebih
+                                    dahulu di atas sebelum mengunggah file JSON.
                                 </p>
                             </div>
                         </div>
@@ -1660,20 +2252,30 @@
                             <div>
                                 {#if importedFileName}
                                     <div class="space-y-1">
-                                        <span class="font-bold text-sm text-cyan-600 dark:text-cyan-400">
+                                        <span
+                                            class="font-bold text-sm text-cyan-600 dark:text-cyan-400"
+                                        >
                                             {importedFileName}
                                         </span>
                                         <p class="text-[11px] text-slate-400">
-                                            Klik atau drag file JSON lain untuk mengganti data.
+                                            Klik atau drag file JSON lain untuk
+                                            mengganti data.
                                         </p>
                                     </div>
                                 {:else}
-                                    <p class="text-xs font-bold text-slate-700 dark:text-slate-300">
-                                        Drop File JSON Data Cleaning di sini, atau{" "}
-                                        <span class="text-cyan-600 dark:text-cyan-400 underline underline-offset-2">Browse File</span>
+                                    <p
+                                        class="text-xs font-bold text-slate-700 dark:text-slate-300"
+                                    >
+                                        Drop File JSON Data Cleaning di sini,
+                                        atau{" "}
+                                        <span
+                                            class="text-cyan-600 dark:text-cyan-400 underline underline-offset-2"
+                                            >Browse File</span
+                                        >
                                     </p>
                                     <p class="text-[11px] text-slate-400 mt-1">
-                                        File hasil export dari menu Cleaning Data Shopee / TikTok Shop Warehub
+                                        File hasil export dari menu Cleaning
+                                        Data Shopee / TikTok Shop Warehub
                                     </p>
                                 {/if}
                             </div>
@@ -1688,42 +2290,75 @@
                         class="p-5 bg-white dark:bg-slate-900 border-2 border-amber-300 dark:border-amber-700/60 rounded-2xl shadow-sm space-y-4"
                     >
                         <!-- Header Card -->
-                        <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-amber-100 dark:border-amber-900/40 pb-3">
+                        <div
+                            class="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-amber-100 dark:border-amber-900/40 pb-3"
+                        >
                             <div class="flex items-start gap-3">
-                                <div class="w-10 h-10 rounded-xl bg-amber-100 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 flex items-center justify-center shrink-0 mt-0.5">
+                                <div
+                                    class="w-10 h-10 rounded-xl bg-amber-100 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 flex items-center justify-center shrink-0 mt-0.5"
+                                >
                                     <AlertTriangle class="w-5 h-5" />
                                 </div>
                                 <div>
-                                    <h4 class="text-sm font-bold text-amber-900 dark:text-amber-200 flex items-center gap-2 flex-wrap">
-                                        <span>Ditemukan {missingSkusList.length} SKU Belum Terdaftar di Database Gudang</span>
-                                        <span class="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-amber-200 dark:bg-amber-900/80 text-amber-800 dark:text-amber-200">
+                                    <h4
+                                        class="text-sm font-bold text-amber-900 dark:text-amber-200 flex items-center gap-2 flex-wrap"
+                                    >
+                                        <span
+                                            >Ditemukan {missingSkusList.length} SKU
+                                            Belum Terdaftar di Database Gudang</span
+                                        >
+                                        <span
+                                            class="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-amber-200 dark:bg-amber-900/80 text-amber-800 dark:text-amber-200"
+                                        >
                                             {missingSkusList.length} SKU
                                         </span>
                                         {#if missingWithMultipleSizesCount > 0}
-                                            <span class="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-purple-100 dark:bg-purple-950/80 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800 flex items-center gap-1">
-                                                <Sparkles class="w-3 h-3 text-purple-500" />
-                                                <span>{missingWithMultipleSizesCount} SKU memiliki &gt; 1 Ukuran</span>
+                                            <span
+                                                class="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-purple-100 dark:bg-purple-950/80 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800 flex items-center gap-1"
+                                            >
+                                                <Sparkles
+                                                    class="w-3 h-3 text-purple-500"
+                                                />
+                                                <span
+                                                    >{missingWithMultipleSizesCount}
+                                                    SKU memiliki &gt; 1 Ukuran</span
+                                                >
                                             </span>
                                         {/if}
                                         {#if totalMissingPcs > 0}
-                                            <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
+                                            <span
+                                                class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300"
+                                            >
                                                 Total {totalMissingPcs} pcs tertahan
                                             </span>
                                         {/if}
                                         {#if totalMissingAmount > 0}
-                                            <span class="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-rose-100 dark:bg-rose-950/80 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800">
-                                                Senilai {formatRupiah(totalMissingAmount)}
+                                            <span
+                                                class="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-rose-100 dark:bg-rose-950/80 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800"
+                                            >
+                                                Senilai {formatRupiah(
+                                                    totalMissingAmount,
+                                                )}
                                             </span>
                                         {/if}
                                     </h4>
-                                    <p class="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
-                                        Daftar referensi SKU beserta ukuran (size) dan variasi yang terdeteksi dari file JSON. Kamu bisa copy baris untuk edit file JSON, atau klik <strong>+ Tambah Produk</strong> untuk mendaftarkan langsung ke Master Data.
+                                    <p
+                                        class="text-xs text-slate-600 dark:text-slate-400 mt-0.5"
+                                    >
+                                        Daftar referensi SKU beserta ukuran
+                                        (size) dan variasi yang terdeteksi dari
+                                        file JSON. Kamu bisa copy baris untuk
+                                        edit file JSON, atau klik <strong
+                                            >+ Tambah Produk</strong
+                                        > untuk mendaftarkan langsung ke Master Data.
                                     </p>
                                 </div>
                             </div>
 
                             <!-- Action Buttons Copy All -->
-                            <div class="flex items-center gap-2 shrink-0 flex-wrap">
+                            <div
+                                class="flex items-center gap-2 shrink-0 flex-wrap"
+                            >
                                 <button
                                     type="button"
                                     onclick={copyAllSummary}
@@ -1731,8 +2366,13 @@
                                     title="Copy ringkasan SKU dan daftar ukuran semua produk yang belum terdaftar"
                                 >
                                     {#if isCopiedAllSummary}
-                                        <CheckCheck class="w-4 h-4 text-emerald-500" />
-                                        <span class="text-emerald-700 dark:text-emerald-300">Tersalin!</span>
+                                        <CheckCheck
+                                            class="w-4 h-4 text-emerald-500"
+                                        />
+                                        <span
+                                            class="text-emerald-700 dark:text-emerald-300"
+                                            >Tersalin!</span
+                                        >
                                     {:else}
                                         <Copy class="w-4 h-4 text-purple-600" />
                                         <span>Copy Ringkasan SKU & Ukuran</span>
@@ -1745,7 +2385,9 @@
                                     title="Copy semua baris dalam format JSON: &quot;Nomor Referensi SKU&quot;: &quot;...&quot;"
                                 >
                                     {#if isCopiedAllJson}
-                                        <CheckCheck class="w-4 h-4 text-emerald-200" />
+                                        <CheckCheck
+                                            class="w-4 h-4 text-emerald-200"
+                                        />
                                         <span>Tersalin Semua!</span>
                                     {:else}
                                         <Copy class="w-4 h-4" />
@@ -1759,7 +2401,9 @@
                                     title="Copy daftar SKU beserta ukuran (size)"
                                 >
                                     {#if isCopiedAllSkus}
-                                        <CheckCheck class="w-4 h-4 text-emerald-500" />
+                                        <CheckCheck
+                                            class="w-4 h-4 text-emerald-500"
+                                        />
                                         <span>Tersalin!</span>
                                     {:else}
                                         <Copy class="w-4 h-4" />
@@ -1772,7 +2416,9 @@
                         <!-- Search Bar -->
                         <div class="flex items-center gap-2">
                             <div class="relative flex-1">
-                                <Search class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                                <Search
+                                    class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"
+                                />
                                 <input
                                     type="text"
                                     bind:value={missingSearchQuery}
@@ -1792,77 +2438,129 @@
                         </div>
 
                         <!-- Rich Cards List for Missing SKUs -->
-                        <div class="max-h-96 overflow-y-auto space-y-3 p-1.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/40">
+                        <div
+                            class="max-h-96 overflow-y-auto space-y-3 p-1.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/40"
+                        >
                             {#each filteredMissingSkus as m, idx}
                                 <div
                                     class="p-4 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:border-amber-400 dark:hover:border-amber-600 transition-all shadow-xs space-y-3 group"
                                 >
                                     <!-- Header Row: SKU, Size Badges & Action Buttons -->
-                                    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-                                        <div class="flex items-center gap-2 flex-wrap">
-                                            <span class="text-xs font-mono text-slate-400 font-bold select-none">
+                                    <div
+                                        class="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+                                    >
+                                        <div
+                                            class="flex items-center gap-2 flex-wrap"
+                                        >
+                                            <span
+                                                class="text-xs font-mono text-slate-400 font-bold select-none"
+                                            >
                                                 {idx + 1}.
                                             </span>
-                                            <code class="px-2.5 py-1 bg-amber-50 dark:bg-amber-950/70 text-amber-700 dark:text-amber-300 font-mono font-bold text-xs rounded-lg border border-amber-200 dark:border-amber-800/80 select-all">
+                                            <code
+                                                class="px-2.5 py-1 bg-amber-50 dark:bg-amber-950/70 text-amber-700 dark:text-amber-300 font-mono font-bold text-xs rounded-lg border border-amber-200 dark:border-amber-800/80 select-all"
+                                            >
                                                 {m.sku}
                                             </code>
 
                                             <!-- Size Badge Highlight -->
                                             {#if (m.sizes && m.sizes.length > 1) || m.has_multiple_sizes}
-                                                <span class="px-2.5 py-0.5 text-[11px] font-extrabold rounded-full bg-purple-100 dark:bg-purple-950/80 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800 flex items-center gap-1 shadow-2xs">
-                                                    <Sparkles class="w-3 h-3 text-purple-500" />
-                                                    <span>{m.sizes ? m.sizes.length : 2} Ukuran:</span>
-                                                    <span class="underline decoration-purple-400">{m.sizes ? m.sizes.join(", ") : ""}</span>
+                                                <span
+                                                    class="px-2.5 py-0.5 text-[11px] font-extrabold rounded-full bg-purple-100 dark:bg-purple-950/80 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800 flex items-center gap-1 shadow-2xs"
+                                                >
+                                                    <Sparkles
+                                                        class="w-3 h-3 text-purple-500"
+                                                    />
+                                                    <span
+                                                        >{m.sizes
+                                                            ? m.sizes.length
+                                                            : 2} Ukuran:</span
+                                                    >
+                                                    <span
+                                                        class="underline decoration-purple-400"
+                                                        >{m.sizes
+                                                            ? m.sizes.join(", ")
+                                                            : ""}</span
+                                                    >
                                                 </span>
                                             {:else if m.sizes && m.sizes.length === 1}
-                                                <span class="px-2.5 py-0.5 text-[11px] font-bold rounded-full bg-sky-100 dark:bg-sky-950/80 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800 flex items-center gap-1">
+                                                <span
+                                                    class="px-2.5 py-0.5 text-[11px] font-bold rounded-full bg-sky-100 dark:bg-sky-950/80 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800 flex items-center gap-1"
+                                                >
                                                     <span>Ukuran:</span>
-                                                    <span class="font-extrabold">{m.sizes[0]}</span>
+                                                    <span class="font-extrabold"
+                                                        >{m.sizes[0]}</span
+                                                    >
                                                 </span>
                                             {:else}
-                                                <span class="px-2 py-0.5 text-[10px] font-medium rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400">
+                                                <span
+                                                    class="px-2 py-0.5 text-[10px] font-medium rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400"
+                                                >
                                                     Ukuran Standar
                                                 </span>
                                             {/if}
 
                                             {#if m.total_qty}
-                                                <span class="px-2 py-0.5 text-[10px] font-bold rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
-                                                    {m.total_qty} pcs ({m.order_count || 1} pesanan)
+                                                <span
+                                                    class="px-2 py-0.5 text-[10px] font-bold rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300"
+                                                >
+                                                    {m.total_qty} pcs ({m.order_count ||
+                                                        1} pesanan)
                                                 </span>
                                             {/if}
                                             {#if m.total_payment && m.total_payment > 0}
-                                                <span class="px-2 py-0.5 text-[10px] font-black rounded-full bg-rose-50 dark:bg-rose-950/70 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-900/60 shadow-2xs">
-                                                    Senilai {formatRupiah(m.total_payment)}
+                                                <span
+                                                    class="px-2 py-0.5 text-[10px] font-black rounded-full bg-rose-50 dark:bg-rose-950/70 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-900/60 shadow-2xs"
+                                                >
+                                                    Senilai {formatRupiah(
+                                                        m.total_payment,
+                                                    )}
                                                 </span>
                                             {/if}
                                         </div>
 
                                         <!-- Action Buttons per Item -->
-                                        <div class="flex items-center gap-1.5 shrink-0 flex-wrap">
+                                        <div
+                                            class="flex items-center gap-1.5 shrink-0 flex-wrap"
+                                        >
                                             <button
                                                 type="button"
-                                                onclick={() => copyJsonLine(m.sku)}
+                                                onclick={() =>
+                                                    copyJsonLine(m.sku)}
                                                 class="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-bold rounded-lg bg-amber-50 dark:bg-amber-950/60 text-amber-800 dark:text-amber-200 hover:bg-amber-100 dark:hover:bg-amber-900/60 border border-amber-200 dark:border-amber-800 transition-all shadow-xs"
                                                 title="Copy satu baris JSON: &quot;Nomor Referensi SKU&quot;: &quot;{m.sku}&quot;,"
                                             >
                                                 {#if copiedRowKey === m.sku + "_line"}
-                                                    <CheckCheck class="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
-                                                    <span class="text-emerald-700 dark:text-emerald-300">Tersalin!</span>
+                                                    <CheckCheck
+                                                        class="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400"
+                                                    />
+                                                    <span
+                                                        class="text-emerald-700 dark:text-emerald-300"
+                                                        >Tersalin!</span
+                                                    >
                                                 {:else}
-                                                    <Copy class="w-3.5 h-3.5 text-amber-600" />
+                                                    <Copy
+                                                        class="w-3.5 h-3.5 text-amber-600"
+                                                    />
                                                     <span>Copy Baris JSON</span>
                                                 {/if}
                                             </button>
 
                                             <button
                                                 type="button"
-                                                onclick={() => copySkuValueOnly(m.sku)}
+                                                onclick={() =>
+                                                    copySkuValueOnly(m.sku)}
                                                 class="inline-flex items-center px-2 py-1.5 text-xs font-semibold rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 transition-all"
                                                 title="Copy hanya nilai SKU: {m.sku}"
                                             >
                                                 {#if copiedRowKey === m.sku + "_raw"}
-                                                    <CheckCheck class="w-3.5 h-3.5 text-emerald-500" />
-                                                    <span class="text-emerald-600 dark:text-emerald-400 ml-1">Tersalin!</span>
+                                                    <CheckCheck
+                                                        class="w-3.5 h-3.5 text-emerald-500"
+                                                    />
+                                                    <span
+                                                        class="text-emerald-600 dark:text-emerald-400 ml-1"
+                                                        >Tersalin!</span
+                                                    >
                                                 {:else}
                                                     <span>SKU</span>
                                                 {/if}
@@ -1870,21 +2568,31 @@
 
                                             <button
                                                 type="button"
-                                                onclick={() => copySkuWithSizes(m)}
+                                                onclick={() =>
+                                                    copySkuWithSizes(m)}
                                                 class="inline-flex items-center gap-1 px-2 py-1.5 text-xs font-semibold rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 transition-all"
-                                                title="Copy SKU beserta daftar ukuran: {m.sku} (Size: {(m.sizes || []).join(', ')})"
+                                                title="Copy SKU beserta daftar ukuran: {m.sku} (Size: {(
+                                                    m.sizes || []
+                                                ).join(', ')})"
                                             >
                                                 {#if copiedRowKey === m.sku + "_info"}
-                                                    <CheckCheck class="w-3.5 h-3.5 text-emerald-500" />
-                                                    <span class="text-emerald-600 dark:text-emerald-400 ml-1">Tersalin!</span>
+                                                    <CheckCheck
+                                                        class="w-3.5 h-3.5 text-emerald-500"
+                                                    />
+                                                    <span
+                                                        class="text-emerald-600 dark:text-emerald-400 ml-1"
+                                                        >Tersalin!</span
+                                                    >
                                                 {:else}
-                                                    <Tag class="w-3 h-3 text-slate-500" />
+                                                    <Tag
+                                                        class="w-3 h-3 text-slate-500"
+                                                    />
                                                     <span>Info Size</span>
                                                 {/if}
                                             </button>
 
                                             <a
-                                                href={`/superadmin/products/create?sku=${encodeURIComponent(m.sku)}&name=${encodeURIComponent(m.product_name || '')}&seller_id=${sellerId || ''}&sizes=${encodeURIComponent((m.sizes || []).join(','))}`}
+                                                href={`/superadmin/products/create?sku=${encodeURIComponent(m.sku)}&name=${encodeURIComponent(m.product_name || "")}&seller_id=${sellerId || ""}&sizes=${encodeURIComponent((m.sizes || []).join(","))}`}
                                                 target="_blank"
                                                 rel="noopener noreferrer"
                                                 class="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-bold rounded-lg bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 border border-emerald-200 dark:border-emerald-800 transition-all shadow-xs"
@@ -1898,22 +2606,36 @@
 
                                     <!-- Product Name -->
                                     <div>
-                                        <p class="text-xs font-semibold text-slate-800 dark:text-slate-100">
-                                            {m.product_name || "Produk Tanpa Nama di JSON"}
+                                        <p
+                                            class="text-xs font-semibold text-slate-800 dark:text-slate-100"
+                                        >
+                                            {m.product_name ||
+                                                "Produk Tanpa Nama di JSON"}
                                         </p>
                                     </div>
 
                                     <!-- Sizes & Variations Details Box -->
-                                    <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800/60 space-y-2 text-xs">
+                                    <div
+                                        class="p-3 rounded-lg bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800/60 space-y-2 text-xs"
+                                    >
                                         <!-- List Ukuran Terdeteksi -->
                                         {#if m.sizes && m.sizes.length > 0}
-                                            <div class="flex items-center gap-2 flex-wrap">
-                                                <span class="text-[11px] font-bold text-slate-500 dark:text-slate-400">
-                                                    Ukuran Terdeteksi ({m.sizes.length}):
+                                            <div
+                                                class="flex items-center gap-2 flex-wrap"
+                                            >
+                                                <span
+                                                    class="text-[11px] font-bold text-slate-500 dark:text-slate-400"
+                                                >
+                                                    Ukuran Terdeteksi ({m.sizes
+                                                        .length}):
                                                 </span>
-                                                <div class="flex items-center gap-1.5 flex-wrap">
+                                                <div
+                                                    class="flex items-center gap-1.5 flex-wrap"
+                                                >
                                                     {#each m.sizes as sz}
-                                                        <span class="px-2.5 py-0.5 rounded-md font-mono font-black text-[11px] bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 shadow-2xs">
+                                                        <span
+                                                            class="px-2.5 py-0.5 rounded-md font-mono font-black text-[11px] bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 shadow-2xs"
+                                                        >
                                                             {sz}
                                                         </span>
                                                     {/each}
@@ -1923,43 +2645,81 @@
 
                                         <!-- Variasi Asli dari JSON -->
                                         {#if m.variations && m.variations.length > 0}
-                                            <div class="flex items-start gap-2 flex-wrap">
-                                                <span class="text-[11px] font-bold text-slate-500 dark:text-slate-400 mt-0.5">
+                                            <div
+                                                class="flex items-start gap-2 flex-wrap"
+                                            >
+                                                <span
+                                                    class="text-[11px] font-bold text-slate-500 dark:text-slate-400 mt-0.5"
+                                                >
                                                     Variasi di JSON:
                                                 </span>
-                                                <div class="flex items-center gap-1.5 flex-wrap">
+                                                <div
+                                                    class="flex items-center gap-1.5 flex-wrap"
+                                                >
                                                     {#each m.variations as vText}
-                                                        <span class="px-2 py-0.5 rounded-md text-[10px] font-medium bg-amber-50/70 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 border border-amber-200/60 dark:border-amber-800/40">
+                                                        <span
+                                                            class="px-2 py-0.5 rounded-md text-[10px] font-medium bg-amber-50/70 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 border border-amber-200/60 dark:border-amber-800/40"
+                                                        >
                                                             {vText}
                                                         </span>
                                                     {/each}
                                                 </div>
                                             </div>
                                         {:else if m.variation}
-                                            <div class="text-[11px] text-slate-600 dark:text-slate-300">
-                                                <span class="font-bold text-slate-500">Variasi:</span> {m.variation}
+                                            <div
+                                                class="text-[11px] text-slate-600 dark:text-slate-300"
+                                            >
+                                                <span
+                                                    class="font-bold text-slate-500"
+                                                    >Variasi:</span
+                                                >
+                                                {m.variation}
                                             </div>
                                         {/if}
 
                                         <!-- Alert Info jika Lebih dari 1 Ukuran -->
                                         {#if (m.sizes && m.sizes.length > 1) || m.has_multiple_sizes}
-                                            <div class="flex items-center gap-1.5 text-[11px] font-medium text-purple-700 dark:text-purple-300 bg-purple-50 dark:bg-purple-950/40 px-2.5 py-1.5 rounded-md border border-purple-200 dark:border-purple-900/60">
-                                                <Sparkles class="w-3.5 h-3.5 shrink-0 text-purple-500" />
+                                            <div
+                                                class="flex items-center gap-1.5 text-[11px] font-medium text-purple-700 dark:text-purple-300 bg-purple-50 dark:bg-purple-950/40 px-2.5 py-1.5 rounded-md border border-purple-200 dark:border-purple-900/60"
+                                            >
+                                                <Sparkles
+                                                    class="w-3.5 h-3.5 shrink-0 text-purple-500"
+                                                />
                                                 <span>
-                                                    Perhatian: Ditemukan <strong>{m.sizes ? m.sizes.length : 2} ukuran berbeda</strong> ({m.sizes ? m.sizes.join(", ") : ""}) untuk produk ini. Pastikan menambahkan masing-masing varian ukuran tersebut ke dalam produk manual ya bwang!
+                                                    Perhatian: Ditemukan <strong
+                                                        >{m.sizes
+                                                            ? m.sizes.length
+                                                            : 2} ukuran berbeda</strong
+                                                    >
+                                                    ({m.sizes
+                                                        ? m.sizes.join(", ")
+                                                        : ""}) untuk produk ini.
+                                                    Pastikan menambahkan
+                                                    masing-masing varian ukuran
+                                                    tersebut ke dalam produk
+                                                    manual ya bwang!
                                                 </span>
                                             </div>
                                         {/if}
 
                                         {#if m.missing_parts && m.missing_parts.length > 0}
-                                            <div class="text-[11px] text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/40 px-2.5 py-1.5 rounded-md border border-rose-200 dark:border-rose-900/60">
-                                                Komponen bundle yang belum ada di database: <strong>{m.missing_parts.join(", ")}</strong>
+                                            <div
+                                                class="text-[11px] text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/40 px-2.5 py-1.5 rounded-md border border-rose-200 dark:border-rose-900/60"
+                                            >
+                                                Komponen bundle yang belum ada
+                                                di database: <strong
+                                                    >{m.missing_parts.join(
+                                                        ", ",
+                                                    )}</strong
+                                                >
                                             </div>
                                         {/if}
                                     </div>
                                 </div>
                             {:else}
-                                <div class="py-8 text-center text-slate-400 text-xs">
+                                <div
+                                    class="py-8 text-center text-slate-400 text-xs"
+                                >
                                     Tidak ada SKU yang cocok dengan pencarian "{missingSearchQuery}".
                                 </div>
                             {/each}
@@ -1974,35 +2734,84 @@
             <div
                 class="rounded-2xl border-2 border-amber-300 dark:border-amber-700/80 bg-gradient-to-r from-amber-50/90 via-orange-50/50 to-amber-50/90 dark:from-amber-950/40 dark:via-orange-950/30 dark:to-amber-950/40 p-5 shadow-sm space-y-4 animate-in fade-in slide-in-from-top-2 duration-300"
             >
-                <div class="flex flex-col md:flex-row md:items-start justify-between gap-4">
+                <div
+                    class="flex flex-col md:flex-row md:items-start justify-between gap-4"
+                >
                     <div class="flex items-start gap-3.5">
-                        <div class="w-11 h-11 rounded-2xl bg-amber-500 text-white flex items-center justify-center shrink-0 shadow-md shadow-amber-500/20 mt-0.5">
+                        <div
+                            class="w-11 h-11 rounded-2xl bg-amber-500 text-white flex items-center justify-center shrink-0 shadow-md shadow-amber-500/20 mt-0.5"
+                        >
                             <AlertTriangle class="w-6 h-6 animate-pulse" />
                         </div>
                         <div class="space-y-1">
                             <div class="flex items-center gap-2 flex-wrap">
-                                <h4 class="text-sm font-extrabold text-amber-950 dark:text-amber-100 flex items-center gap-2">
+                                <h4
+                                    class="text-sm font-extrabold text-amber-950 dark:text-amber-100 flex items-center gap-2"
+                                >
                                     {#if missingSkusList.length > 0}
-                                        <span>Peringatan: Ditemukan {missingSkusList.length} SKU Belum Terdaftar & Selisih Pencairan Netto</span>
+                                        <span
+                                            >Peringatan: Ditemukan {missingSkusList.length}
+                                            SKU Belum Terdaftar & Selisih Pencairan
+                                            Netto</span
+                                        >
                                     {:else}
-                                        <span>Peringatan: Terdapat Selisih Nilai Pencairan Netto</span>
+                                        <span
+                                            >Peringatan: Terdapat Selisih Nilai
+                                            Pencairan Netto</span
+                                        >
                                     {/if}
                                 </h4>
-                                <span class="px-2.5 py-0.5 rounded-full text-[10px] font-black bg-rose-100 dark:bg-rose-950/80 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800 shadow-2xs">
-                                    Selisih: -{formatRupiah(Math.abs(filePencairanDiff || totalMissingAmount))}
+                                <span
+                                    class="px-2.5 py-0.5 rounded-full text-[10px] font-black bg-rose-100 dark:bg-rose-950/80 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800 shadow-2xs"
+                                >
+                                    Selisih: -{formatRupiah(
+                                        Math.abs(
+                                            filePencairanDiff ||
+                                                totalMissingAmount,
+                                        ),
+                                    )}
                                 </span>
                                 {#if totalMissingPcs > 0}
-                                    <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-200 dark:bg-amber-900/60 text-amber-900 dark:text-amber-200">
+                                    <span
+                                        class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-200 dark:bg-amber-900/60 text-amber-900 dark:text-amber-200"
+                                    >
                                         {totalMissingPcs} pcs tertahan
                                     </span>
                                 {/if}
                             </div>
-                            <p class="text-xs text-amber-900/80 dark:text-amber-200/80 leading-relaxed">
-                                Total pencairan bersih di file JSON adalah <strong>{formatRupiah(fileSuggestedPencairan || 0)}</strong>, namun item yang berhasil dicocokkan ke database gudang saat ini bernilai <strong>{formatRupiah(liveTotalSelling)}</strong>.
+                            <p
+                                class="text-xs text-amber-900/80 dark:text-amber-200/80 leading-relaxed"
+                            >
+                                Total pencairan bersih di file JSON adalah <strong
+                                    >{formatRupiah(
+                                        fileSuggestedPencairan || 0,
+                                    )}</strong
+                                >, namun item yang berhasil dicocokkan ke
+                                database gudang saat ini bernilai
+                                <strong>{formatRupiah(liveTotalSelling)}</strong
+                                >.
                                 {#if missingSkusList.length > 0}
-                                    Terdapat <strong>{missingSkusList.length} SKU ({totalMissingPcs} pcs)</strong> senilai <strong>{formatRupiah(totalMissingAmount || Math.abs(filePencairanDiff))}</strong> yang belum terdaftar di gudang sehingga belum bisa dipotong stoknya.
+                                    Terdapat <strong
+                                        >{missingSkusList.length} SKU ({totalMissingPcs}
+                                        pcs)</strong
+                                    >
+                                    senilai
+                                    <strong
+                                        >{formatRupiah(
+                                            totalMissingAmount ||
+                                                Math.abs(filePencairanDiff),
+                                        )}</strong
+                                    > yang belum terdaftar di gudang sehingga belum
+                                    bisa dipotong stoknya.
                                 {:else}
-                                    Semua SKU ({liveTotalQty} pcs) telah cocok dengan database gudang, namun terdapat selisih nominal pencairan sebesar <strong>{formatRupiah(Math.abs(filePencairanDiff))}</strong>.
+                                    Semua SKU ({liveTotalQty} pcs) telah cocok dengan
+                                    database gudang, namun terdapat selisih nominal
+                                    pencairan sebesar
+                                    <strong
+                                        >{formatRupiah(
+                                            Math.abs(filePencairanDiff),
+                                        )}</strong
+                                    >.
                                 {/if}
                             </p>
                         </div>
@@ -2011,41 +2820,88 @@
                         <button
                             type="button"
                             onclick={() => {
-                                const el = document.getElementById("section-missing-skus");
-                                if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+                                const el = document.getElementById(
+                                    "section-missing-skus",
+                                );
+                                if (el)
+                                    el.scrollIntoView({
+                                        behavior: "smooth",
+                                        block: "start",
+                                    });
                             }}
                             class="shrink-0 px-3.5 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold shadow-xs flex items-center gap-1.5 transition-all self-start md:self-center"
                         >
                             <Search class="w-4 h-4" />
-                            <span>Lihat {missingSkusList.length} SKU Missing</span>
+                            <span
+                                >Lihat {missingSkusList.length} SKU Missing</span
+                            >
                         </button>
                     {/if}
                 </div>
 
                 <!-- 3-Pill Breakdown Comparison -->
-                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-amber-200/60 dark:border-amber-800/40">
-                    <div class="bg-white/80 dark:bg-slate-900/80 rounded-xl p-3 border border-amber-200 dark:border-amber-900/40">
-                        <span class="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">Total Pencairan File JSON</span>
-                        <div class="text-base font-extrabold text-slate-800 dark:text-slate-100 mt-0.5">
-                            {formatRupiah(fileSuggestedPencairan || (liveTotalSelling + totalMissingAmount))}
+                <div
+                    class="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-amber-200/60 dark:border-amber-800/40"
+                >
+                    <div
+                        class="bg-white/80 dark:bg-slate-900/80 rounded-xl p-3 border border-amber-200 dark:border-amber-900/40"
+                    >
+                        <span
+                            class="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400"
+                            >Total Pencairan File JSON</span
+                        >
+                        <div
+                            class="text-base font-extrabold text-slate-800 dark:text-slate-100 mt-0.5"
+                        >
+                            {formatRupiah(
+                                fileSuggestedPencairan ||
+                                    liveTotalSelling + totalMissingAmount,
+                            )}
                         </div>
-                        <p class="text-[10px] text-slate-400 mt-0.5">{fileExpectedQty ? `${fileExpectedQty} pcs di file` : 'Semua pesanan di file'}</p>
+                        <p class="text-[10px] text-slate-400 mt-0.5">
+                            {fileExpectedQty
+                                ? `${fileExpectedQty} pcs di file`
+                                : "Semua pesanan di file"}
+                        </p>
                     </div>
-                    <div class="bg-white/80 dark:bg-slate-900/80 rounded-xl p-3 border border-cyan-200 dark:border-cyan-900/40">
-                        <span class="text-[10px] font-bold uppercase tracking-wider text-cyan-600 dark:text-cyan-400">Tercatat Gudang (Masuk Form)</span>
-                        <div class="text-base font-extrabold text-cyan-600 dark:text-cyan-400 mt-0.5">
+                    <div
+                        class="bg-white/80 dark:bg-slate-900/80 rounded-xl p-3 border border-cyan-200 dark:border-cyan-900/40"
+                    >
+                        <span
+                            class="text-[10px] font-bold uppercase tracking-wider text-cyan-600 dark:text-cyan-400"
+                            >Tercatat Gudang (Masuk Form)</span
+                        >
+                        <div
+                            class="text-base font-extrabold text-cyan-600 dark:text-cyan-400 mt-0.5"
+                        >
                             {formatRupiah(liveTotalSelling)}
                         </div>
-                        <p class="text-[10px] text-slate-400 mt-0.5">{liveTotalQty} pcs siap potong stok</p>
+                        <p class="text-[10px] text-slate-400 mt-0.5">
+                            {liveTotalQty} pcs siap potong stok
+                        </p>
                     </div>
-                    <div class="bg-rose-50/90 dark:bg-rose-950/50 rounded-xl p-3 border border-rose-200 dark:border-rose-900/50">
-                        <span class="text-[10px] font-bold uppercase tracking-wider text-rose-600 dark:text-rose-400">Selisih Belum Tercatat</span>
-                        <div class="text-base font-extrabold text-rose-600 dark:text-rose-400 mt-0.5">
-                            -{formatRupiah(Math.abs(filePencairanDiff || totalMissingAmount))}
+                    <div
+                        class="bg-rose-50/90 dark:bg-rose-950/50 rounded-xl p-3 border border-rose-200 dark:border-rose-900/50"
+                    >
+                        <span
+                            class="text-[10px] font-bold uppercase tracking-wider text-rose-600 dark:text-rose-400"
+                            >Selisih Belum Tercatat</span
+                        >
+                        <div
+                            class="text-base font-extrabold text-rose-600 dark:text-rose-400 mt-0.5"
+                        >
+                            -{formatRupiah(
+                                Math.abs(
+                                    filePencairanDiff || totalMissingAmount,
+                                ),
+                            )}
                         </div>
-                        <p class="text-[10px] text-rose-600/80 dark:text-rose-400/80 mt-0.5">
+                        <p
+                            class="text-[10px] text-rose-600/80 dark:text-rose-400/80 mt-0.5"
+                        >
                             {#if missingSkusList.length > 0}
-                                {totalMissingPcs} pcs tertahan dari {missingSkusList.length} SKU
+                                {totalMissingPcs} pcs tertahan dari {missingSkusList.length}
+                                SKU
                             {:else}
                                 Selisih nilai pencairan (Semua SKU cocok)
                             {/if}
@@ -2066,7 +2922,10 @@
                         >Total Qty Out</span
                     >
                     {#if totalMissingPcs > 0}
-                        <span class="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300" title="Item belum terdaftar di database">
+                        <span
+                            class="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300"
+                            title="Item belum terdaftar di database"
+                        >
                             +{totalMissingPcs} missing
                         </span>
                     {/if}
@@ -2075,12 +2934,18 @@
                     class="text-xl font-extrabold text-slate-800 dark:text-slate-100"
                 >
                     {liveTotalQty.toLocaleString("id-ID")}
-                    <span class="text-xs text-slate-400 font-semibold">pcs</span>
+                    <span class="text-xs text-slate-400 font-semibold">pcs</span
+                    >
                 </div>
                 {#if fileExpectedQty && fileExpectedQty !== liveTotalQty}
-                    <p class="text-[10px] text-slate-500">File: {fileExpectedQty.toLocaleString("id-ID")} pcs (-{fileExpectedQty - liveTotalQty} pcs)</p>
+                    <p class="text-[10px] text-slate-500">
+                        File: {fileExpectedQty.toLocaleString("id-ID")} pcs (-{fileExpectedQty -
+                            liveTotalQty} pcs)
+                    </p>
                 {:else}
-                    <p class="text-[10px] text-slate-400">Total unit barang keluar</p>
+                    <p class="text-[10px] text-slate-400">
+                        Total unit barang keluar
+                    </p>
                 {/if}
             </div>
             <div
@@ -2106,8 +2971,13 @@
                         >Total Pencairan (Netto)</span
                     >
                     {#if fileSuggestedPencairan && Math.abs(filePencairanDiff) > 50}
-                        <span class="text-[9px] font-extrabold px-1.5 py-0.5 rounded-full bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300 border border-rose-200 dark:border-rose-800" title="Ada selisih dari file pencairan">
-                            Selisih: -{formatRupiah(Math.abs(filePencairanDiff))}
+                        <span
+                            class="text-[9px] font-extrabold px-1.5 py-0.5 rounded-full bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300 border border-rose-200 dark:border-rose-800"
+                            title="Ada selisih dari file pencairan"
+                        >
+                            Selisih: -{formatRupiah(
+                                Math.abs(filePencairanDiff),
+                            )}
                         </span>
                     {/if}
                 </div>
@@ -2117,12 +2987,19 @@
                     {formatRupiah(liveTotalSelling)}
                 </div>
                 {#if fileSuggestedPencairan && Math.abs(filePencairanDiff) > 50}
-                    <div class="flex items-center justify-between text-[10px] text-slate-500 pt-1 border-t border-slate-100 dark:border-slate-800">
+                    <div
+                        class="flex items-center justify-between text-[10px] text-slate-500 pt-1 border-t border-slate-100 dark:border-slate-800"
+                    >
                         <span>Pencairan File:</span>
-                        <span class="font-bold text-slate-700 dark:text-slate-300">{formatRupiah(fileSuggestedPencairan)}</span>
+                        <span
+                            class="font-bold text-slate-700 dark:text-slate-300"
+                            >{formatRupiah(fileSuggestedPencairan)}</span
+                        >
                     </div>
                 {:else}
-                    <p class="text-[10px] text-slate-400">Pencairan Bersih (Σ Jual × Qty)</p>
+                    <p class="text-[10px] text-slate-400">
+                        Pencairan Bersih (Σ Jual × Qty)
+                    </p>
                 {/if}
             </div>
             <div
@@ -2134,7 +3011,10 @@
                         >Total Bruto</span
                     >
                     {#if liveMarketplaceFees > 0}
-                        <span class="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400" title="Potongan Biaya Admin / Voucher Marketplace">
+                        <span
+                            class="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400"
+                            title="Potongan Biaya Admin / Voucher Marketplace"
+                        >
                             Potongan: -{formatRupiah(liveMarketplaceFees)}
                         </span>
                     {/if}
@@ -2158,7 +3038,12 @@
                 >
                     {formatRupiah(liveEstProfit)}
                 </div>
-                <p class="text-[10px] font-semibold text-violet-500 dark:text-violet-400 truncate" title="Pencairan ({formatRupiah(liveTotalSelling)}) - Total HPP Modal ({formatRupiah(liveTotalHpp)})">
+                <p
+                    class="text-[10px] font-semibold text-violet-500 dark:text-violet-400 truncate"
+                    title="Pencairan ({formatRupiah(
+                        liveTotalSelling,
+                    )}) - Total HPP Modal ({formatRupiah(liveTotalHpp)})"
+                >
                     Pencairan - Total HPP Modal
                 </p>
             </div>
@@ -2169,22 +3054,37 @@
             <div
                 class="bg-white dark:bg-slate-900 rounded-2xl border-2 border-rose-300 dark:border-rose-800/80 shadow-md p-6 space-y-4"
             >
-                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-rose-100 dark:border-rose-950 pb-3">
+                <div
+                    class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-rose-100 dark:border-rose-950 pb-3"
+                >
                     <div class="flex items-start gap-3">
-                        <div class="w-10 h-10 rounded-2xl bg-rose-100 dark:bg-rose-950/70 text-rose-600 dark:text-rose-400 flex items-center justify-center shrink-0 shadow-xs">
+                        <div
+                            class="w-10 h-10 rounded-2xl bg-rose-100 dark:bg-rose-950/70 text-rose-600 dark:text-rose-400 flex items-center justify-center shrink-0 shadow-xs"
+                        >
                             <AlertTriangle class="w-5 h-5 animate-pulse" />
                         </div>
                         <div>
                             <div class="flex items-center gap-2">
-                                <h3 class="text-sm font-extrabold text-rose-950 dark:text-rose-200">
-                                    Perhatian: Ditemukan {deficitItems.length} Produk dengan Stok Kosong (0 pcs) / Selisih Gudang
+                                <h3
+                                    class="text-sm font-extrabold text-rose-950 dark:text-rose-200"
+                                >
+                                    Perhatian: Ditemukan {deficitItems.length} Produk
+                                    dengan Stok Kosong (0 pcs) / Selisih Gudang
                                 </h3>
-                                <span class="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300">
+                                <span
+                                    class="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300"
+                                >
                                     {deficitItems.length} Item Defisit
                                 </span>
                             </div>
-                            <p class="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
-                                Produk berikut memiliki stok 0 atau jumlah barang keluar melebihi stok yang ada di sistem gudang. Kamu bisa menambahkan stok secara manual ke sistem di sini atau menyesuaikan jumlah pcs keluar.
+                            <p
+                                class="text-xs text-slate-600 dark:text-slate-400 mt-0.5"
+                            >
+                                Produk berikut memiliki stok 0 atau jumlah
+                                barang keluar melebihi stok yang ada di sistem
+                                gudang. Kamu bisa menambahkan stok secara manual
+                                ke sistem di sini atau menyesuaikan jumlah pcs
+                                keluar.
                             </p>
                         </div>
                     </div>
@@ -2210,102 +3110,186 @@
                 </div>
 
                 {#if adjustSuccessToast}
-                    <div class="p-3 bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800 rounded-xl flex items-center gap-2 text-xs font-bold text-emerald-800 dark:text-emerald-300 animate-in fade-in">
+                    <div
+                        class="p-3 bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800 rounded-xl flex items-center gap-2 text-xs font-bold text-emerald-800 dark:text-emerald-300 animate-in fade-in"
+                    >
                         <CheckCheck class="w-4 h-4 text-emerald-600" />
                         <span>{adjustSuccessToast}</span>
                     </div>
                 {/if}
 
                 <!-- Tabel Defisit & Penambahan Manual -->
-                <div class="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-950/30">
+                <div
+                    class="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-950/30"
+                >
                     <table class="w-full text-left text-xs">
-                        <thead class="bg-rose-50/70 dark:bg-rose-950/40 text-rose-900 dark:text-rose-200 font-bold border-b border-rose-100 dark:border-rose-900/50">
+                        <thead
+                            class="bg-rose-50/70 dark:bg-rose-950/40 text-rose-900 dark:text-rose-200 font-bold border-b border-rose-100 dark:border-rose-900/50"
+                        >
                             <tr>
                                 <th class="p-3 w-10 text-center">No</th>
                                 <th class="p-3">SKU & Varian Produk</th>
                                 <th class="p-3 w-32">Mitra Seller</th>
-                                <th class="p-3 text-center w-28">Stok Sistem</th>
+                                <th class="p-3 text-center w-28">Stok Sistem</th
+                                >
                                 <th class="p-3 text-center w-28">Qty Keluar</th>
-                                <th class="p-3 text-center w-32">Status Selisih</th>
-                                <th class="p-3 w-60 text-right">Tambah Stok Manual ke Gudang</th>
+                                <th class="p-3 text-center w-32"
+                                    >Status Selisih</th
+                                >
+                                <th class="p-3 w-60 text-right"
+                                    >Tambah Stok Manual ke Gudang</th
+                                >
                             </tr>
                         </thead>
-                        <tbody class="divide-y divide-slate-200 dark:divide-slate-800 font-medium">
+                        <tbody
+                            class="divide-y divide-slate-200 dark:divide-slate-800 font-medium"
+                        >
                             {#each deficitItems as def, idx}
                                 {#if def.item.is_bundle && def.item.bundle_components && def.item.bundle_components.length > 0}
                                     <!-- Baris Header Bundle -->
-                                    <tr class="bg-indigo-50/50 dark:bg-indigo-950/30 border-t-2 border-indigo-200 dark:border-indigo-900 transition-colors">
-                                        <td class="p-3 text-center text-slate-500 font-bold text-[11px]">{idx + 1}</td>
+                                    <tr
+                                        class="bg-indigo-50/50 dark:bg-indigo-950/30 border-t-2 border-indigo-200 dark:border-indigo-900 transition-colors"
+                                    >
+                                        <td
+                                            class="p-3 text-center text-slate-500 font-bold text-[11px]"
+                                            >{idx + 1}</td
+                                        >
                                         <td class="p-3">
-                                            <div class="flex items-center gap-1.5 flex-wrap mb-1">
-                                                <span class="px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 dark:bg-indigo-900/80 dark:text-indigo-200 text-[10px] font-extrabold border border-indigo-200 dark:border-indigo-800 flex items-center gap-1">
-                                                    <Layers class="w-3 h-3 text-indigo-500" />
-                                                    PAKET BUNDLE ({def.item.bundle_components.length} Komponen)
+                                            <div
+                                                class="flex items-center gap-1.5 flex-wrap mb-1"
+                                            >
+                                                <span
+                                                    class="px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 dark:bg-indigo-900/80 dark:text-indigo-200 text-[10px] font-extrabold border border-indigo-200 dark:border-indigo-800 flex items-center gap-1"
+                                                >
+                                                    <Layers
+                                                        class="w-3 h-3 text-indigo-500"
+                                                    />
+                                                    PAKET BUNDLE ({def.item
+                                                        .bundle_components
+                                                        .length} Komponen)
                                                 </span>
                                             </div>
-                                            <div class="font-bold text-slate-900 dark:text-slate-100 truncate max-w-sm">
-                                                {def.item.product_name || "Produk Bundle"}
+                                            <div
+                                                class="font-bold text-slate-900 dark:text-slate-100 truncate max-w-sm"
+                                            >
+                                                {def.item.product_name ||
+                                                    "Produk Bundle"}
                                             </div>
-                                            <div class="font-mono text-indigo-600 dark:text-indigo-400 font-bold text-[11px] flex items-center gap-1.5 mt-0.5">
+                                            <div
+                                                class="font-mono text-indigo-600 dark:text-indigo-400 font-bold text-[11px] flex items-center gap-1.5 mt-0.5"
+                                            >
                                                 <span>{def.item.sku}</span>
                                                 {#if def.item.size}
-                                                    <span class="px-1.5 py-0.2 rounded bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-[10px] font-bold">
+                                                    <span
+                                                        class="px-1.5 py-0.2 rounded bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-[10px] font-bold"
+                                                    >
                                                         {def.item.size}
                                                     </span>
                                                 {/if}
                                             </div>
-                                            <div class="text-[10px] text-indigo-700 dark:text-indigo-300/80 mt-1 font-normal flex items-center gap-1">
-                                                <span>↳ Stok paket dihitung dari komponen. Isi stok pada masing-masing SKU komponen di bawah:</span>
+                                            <div
+                                                class="text-[10px] text-indigo-700 dark:text-indigo-300/80 mt-1 font-normal flex items-center gap-1"
+                                            >
+                                                <span
+                                                    >↳ Stok paket dihitung dari
+                                                    komponen. Isi stok pada
+                                                    masing-masing SKU komponen
+                                                    di bawah:</span
+                                                >
                                             </div>
                                         </td>
-                                        <td class="p-3 text-slate-600 dark:text-slate-400 truncate">
+                                        <td
+                                            class="p-3 text-slate-600 dark:text-slate-400 truncate"
+                                        >
                                             {def.item.seller_name || "Mitra"}
                                         </td>
                                         <td class="p-3 text-center">
-                                            <span class="px-2 py-1 rounded-md text-[11px] font-extrabold {def.isZero ? 'bg-rose-200 text-rose-900 dark:bg-rose-900/80 dark:text-rose-200' : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'}">
+                                            <span
+                                                class="px-2 py-1 rounded-md text-[11px] font-extrabold {def.isZero
+                                                    ? 'bg-rose-200 text-rose-900 dark:bg-rose-900/80 dark:text-rose-200'
+                                                    : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'}"
+                                            >
                                                 {def.avail} set
                                             </span>
                                         </td>
                                         <td class="p-3 text-center">
-                                            <div class="flex items-center justify-center gap-1">
+                                            <div
+                                                class="flex items-center justify-center gap-1"
+                                            >
                                                 <input
                                                     type="number"
                                                     min="1"
-                                                    bind:value={formItems[def.index].qty}
+                                                    bind:value={
+                                                        formItems[def.index].qty
+                                                    }
                                                     class="w-16 text-center rounded-xl border border-rose-300 dark:border-rose-700 bg-white dark:bg-slate-900 py-1 text-xs font-extrabold text-rose-600 dark:text-rose-400 focus:ring-2 focus:ring-rose-500"
                                                     title="Ubah Qty Keluar jika diperlukan"
                                                 />
-                                                <span class="text-[10px] text-slate-400">set</span>
+                                                <span
+                                                    class="text-[10px] text-slate-400"
+                                                    >set</span
+                                                >
                                             </div>
                                         </td>
                                         <td class="p-3 text-center">
                                             {#if def.isZero}
-                                                <span class="text-[11px] font-extrabold text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/60 px-2 py-0.5 rounded-full border border-rose-200 dark:border-rose-800/60">
+                                                <span
+                                                    class="text-[11px] font-extrabold text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/60 px-2 py-0.5 rounded-full border border-rose-200 dark:border-rose-800/60"
+                                                >
                                                     Stok 0 (Kosong)
                                                 </span>
                                             {:else}
-                                                <span class="text-[11px] font-extrabold text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/60 px-2 py-0.5 rounded-full border border-amber-200 dark:border-amber-800/60">
+                                                <span
+                                                    class="text-[11px] font-extrabold text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/60 px-2 py-0.5 rounded-full border border-amber-200 dark:border-amber-800/60"
+                                                >
                                                     Kurang {def.diff} set
                                                 </span>
                                             {/if}
                                         </td>
                                         <td class="p-3 text-right">
-                                            <div class="flex items-center justify-end gap-1.5">
+                                            <div
+                                                class="flex items-center justify-end gap-1.5"
+                                            >
                                                 <button
                                                     type="button"
-                                                    disabled={adjustingVariantId === def.item.product_variant_id || !warehouseId}
+                                                    disabled={adjustingVariantId ===
+                                                        def.item
+                                                            .product_variant_id ||
+                                                        !warehouseId}
                                                     onclick={() => {
-                                                        const addQty = adjustInputMap[def.item.product_variant_id!] ?? (def.diff > 0 ? def.diff : def.qtyOut);
-                                                        handleQuickAdjustSingle(def.item.product_variant_id!, addQty, def.index);
+                                                        const addQty =
+                                                            adjustInputMap[
+                                                                def.item
+                                                                    .product_variant_id!
+                                                            ] ??
+                                                            (def.diff > 0
+                                                                ? def.diff
+                                                                : def.qtyOut);
+                                                        handleQuickAdjustSingle(
+                                                            def.item
+                                                                .product_variant_id!,
+                                                            addQty,
+                                                            def.index,
+                                                        );
                                                     }}
                                                     class="px-2.5 py-1 text-[11px] font-bold rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white flex items-center gap-1 transition-all shadow-xs shrink-0"
                                                     title="Top-Up seluruh komponen bundle sekaligus untuk memenuhi pesanan"
                                                 >
                                                     {#if adjustingVariantId === def.item.product_variant_id}
-                                                        <RefreshCw class="w-3.5 h-3.5 animate-spin" />
+                                                        <RefreshCw
+                                                            class="w-3.5 h-3.5 animate-spin"
+                                                        />
                                                     {:else}
-                                                        <Plus class="w-3.5 h-3.5" />
-                                                        <span>Top-Up Semua Isi Bundle (+{def.diff > 0 ? def.diff : def.qtyOut} set)</span>
+                                                        <Plus
+                                                            class="w-3.5 h-3.5"
+                                                        />
+                                                        <span
+                                                            >Top-Up Semua Isi
+                                                            Bundle (+{def.diff >
+                                                            0
+                                                                ? def.diff
+                                                                : def.qtyOut} set)</span
+                                                        >
                                                     {/if}
                                                 </button>
                                             </div>
@@ -2314,90 +3298,175 @@
 
                                     <!-- Sub-baris Komponen Bundle -->
                                     {#each def.item.bundle_components as comp, cIdx}
-                                        {@const compNeeded = (comp.quantity || 1) * (formItems[def.index]?.qty || 0)}
-                                        {@const compAvail = Number(comp.available_stock ?? 0)}
-                                        {@const compDiff = Math.max(0, compNeeded - compAvail)}
-                                        <tr class="bg-indigo-50/20 dark:bg-indigo-950/10 hover:bg-indigo-50/40 dark:hover:bg-indigo-950/20 transition-colors border-l-4 border-indigo-400 dark:border-indigo-600">
-                                            <td class="p-2.5 text-center text-indigo-400 font-bold text-xs">
+                                        {@const compNeeded =
+                                            (comp.quantity || 1) *
+                                            (formItems[def.index]?.qty || 0)}
+                                        {@const compAvail = Number(
+                                            comp.available_stock ?? 0,
+                                        )}
+                                        {@const compDiff = Math.max(
+                                            0,
+                                            compNeeded - compAvail,
+                                        )}
+                                        <tr
+                                            class="bg-indigo-50/20 dark:bg-indigo-950/10 hover:bg-indigo-50/40 dark:hover:bg-indigo-950/20 transition-colors border-l-4 border-indigo-400 dark:border-indigo-600"
+                                        >
+                                            <td
+                                                class="p-2.5 text-center text-indigo-400 font-bold text-xs"
+                                            >
                                                 ↳
                                             </td>
                                             <td class="p-2.5">
-                                                <div class="font-bold text-slate-800 dark:text-slate-200 text-xs truncate max-w-sm">
+                                                <div
+                                                    class="font-bold text-slate-800 dark:text-slate-200 text-xs truncate max-w-sm"
+                                                >
                                                     {comp.product_name}
                                                 </div>
-                                                <div class="font-mono text-indigo-600 dark:text-indigo-400 font-bold text-[11px] flex items-center gap-1.5 mt-0.5">
+                                                <div
+                                                    class="font-mono text-indigo-600 dark:text-indigo-400 font-bold text-[11px] flex items-center gap-1.5 mt-0.5"
+                                                >
                                                     <span>{comp.sku}</span>
                                                     {#if comp.size}
-                                                        <span class="px-1.5 py-0.2 rounded bg-indigo-100 dark:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 text-[10px] font-bold">
+                                                        <span
+                                                            class="px-1.5 py-0.2 rounded bg-indigo-100 dark:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 text-[10px] font-bold"
+                                                        >
                                                             {comp.size}
                                                         </span>
                                                     {/if}
                                                     {#if comp.color}
-                                                        <span class="text-slate-400 text-[10px]">({comp.color})</span>
+                                                        <span
+                                                            class="text-slate-400 text-[10px]"
+                                                            >({comp.color})</span
+                                                        >
                                                     {/if}
-                                                    <span class="px-1.5 py-0.2 rounded bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-[10px]">
+                                                    <span
+                                                        class="px-1.5 py-0.2 rounded bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-[10px]"
+                                                    >
                                                         1 Set = {comp.quantity} pcs
                                                     </span>
                                                 </div>
                                             </td>
-                                            <td class="p-2.5 text-slate-500 dark:text-slate-400 text-xs truncate">
-                                                {comp.seller_name || def.item.seller_name || "-"}
+                                            <td
+                                                class="p-2.5 text-slate-500 dark:text-slate-400 text-xs truncate"
+                                            >
+                                                {comp.seller_name ||
+                                                    def.item.seller_name ||
+                                                    "-"}
                                             </td>
                                             <td class="p-2.5 text-center">
-                                                <span class="px-2 py-0.5 rounded text-[11px] font-bold {compAvail <= 0 ? 'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300' : compDiff > 0 ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300' : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'}">
+                                                <span
+                                                    class="px-2 py-0.5 rounded text-[11px] font-bold {compAvail <=
+                                                    0
+                                                        ? 'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300'
+                                                        : compDiff > 0
+                                                          ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                                                          : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'}"
+                                                >
                                                     {compAvail} pcs
                                                 </span>
                                             </td>
-                                            <td class="p-2.5 text-center text-xs font-bold text-slate-700 dark:text-slate-200">
+                                            <td
+                                                class="p-2.5 text-center text-xs font-bold text-slate-700 dark:text-slate-200"
+                                            >
                                                 <span>{compNeeded} pcs</span>
-                                                <span class="text-[10px] text-slate-400 block font-normal">
-                                                    ({comp.quantity} × {formItems[def.index]?.qty || 0} set)
+                                                <span
+                                                    class="text-[10px] text-slate-400 block font-normal"
+                                                >
+                                                    ({comp.quantity} × {formItems[
+                                                        def.index
+                                                    ]?.qty || 0} set)
                                                 </span>
                                             </td>
                                             <td class="p-2.5 text-center">
                                                 {#if compAvail <= 0}
-                                                    <span class="text-[10px] font-extrabold text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/60 px-2 py-0.5 rounded-full border border-rose-200 dark:border-rose-800/60">
-                                                        Stok 0 (Kurang {compDiff} pcs)
+                                                    <span
+                                                        class="text-[10px] font-extrabold text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/60 px-2 py-0.5 rounded-full border border-rose-200 dark:border-rose-800/60"
+                                                    >
+                                                        Stok 0 (Kurang {compDiff}
+                                                        pcs)
                                                     </span>
                                                 {:else if compDiff > 0}
-                                                    <span class="text-[10px] font-extrabold text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/60 px-2 py-0.5 rounded-full border border-amber-200 dark:border-amber-800/60">
+                                                    <span
+                                                        class="text-[10px] font-extrabold text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/60 px-2 py-0.5 rounded-full border border-amber-200 dark:border-amber-800/60"
+                                                    >
                                                         Kurang {compDiff} pcs
                                                     </span>
                                                 {:else}
-                                                    <span class="text-[10px] font-extrabold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/60 px-2 py-0.5 rounded-full border border-emerald-200 dark:border-emerald-800/60">
+                                                    <span
+                                                        class="text-[10px] font-extrabold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/60 px-2 py-0.5 rounded-full border border-emerald-200 dark:border-emerald-800/60"
+                                                    >
                                                         Cukup ({compAvail} pcs)
                                                     </span>
                                                 {/if}
                                             </td>
                                             <td class="p-2.5 text-right">
-                                                <div class="flex items-center justify-end gap-1.5">
+                                                <div
+                                                    class="flex items-center justify-end gap-1.5"
+                                                >
                                                     <div class="relative w-20">
                                                         <input
                                                             type="number"
                                                             min="1"
                                                             placeholder="Qty"
-                                                            value={adjustInputMap[comp.component_variant_id] ?? (compDiff > 0 ? compDiff : (compAvail <= 0 ? compNeeded : comp.quantity))}
+                                                            value={adjustInputMap[
+                                                                comp
+                                                                    .component_variant_id
+                                                            ] ??
+                                                                (compDiff > 0
+                                                                    ? compDiff
+                                                                    : compAvail <=
+                                                                        0
+                                                                      ? compNeeded
+                                                                      : comp.quantity)}
                                                             oninput={(e) => {
-                                                                adjustInputMap[comp.component_variant_id] = Number((e.target as HTMLInputElement).value);
+                                                                adjustInputMap[
+                                                                    comp.component_variant_id
+                                                                ] = Number(
+                                                                    (
+                                                                        e.target as HTMLInputElement
+                                                                    ).value,
+                                                                );
                                                             }}
                                                             class="w-full text-center rounded-xl border border-indigo-200 dark:border-indigo-800 bg-white dark:bg-slate-900 py-1 text-xs font-bold text-slate-800 dark:text-slate-100"
                                                         />
                                                     </div>
                                                     <button
                                                         type="button"
-                                                        disabled={adjustingVariantId === comp.component_variant_id || !warehouseId}
+                                                        disabled={adjustingVariantId ===
+                                                            comp.component_variant_id ||
+                                                            !warehouseId}
                                                         onclick={() => {
-                                                            const addQty = adjustInputMap[comp.component_variant_id] ?? (compDiff > 0 ? compDiff : (compAvail <= 0 ? compNeeded : comp.quantity));
-                                                            handleQuickAdjustComponent(comp.component_variant_id, addQty, def.index);
+                                                            const addQty =
+                                                                adjustInputMap[
+                                                                    comp
+                                                                        .component_variant_id
+                                                                ] ??
+                                                                (compDiff > 0
+                                                                    ? compDiff
+                                                                    : compAvail <=
+                                                                        0
+                                                                      ? compNeeded
+                                                                      : comp.quantity);
+                                                            handleQuickAdjustComponent(
+                                                                comp.component_variant_id,
+                                                                addQty,
+                                                                def.index,
+                                                            );
                                                         }}
                                                         class="px-2.5 py-1 text-xs font-bold rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white flex items-center gap-1 transition-all shadow-xs shrink-0"
                                                         title="Tambah stok ke varian komponen ini"
                                                     >
                                                         {#if adjustingVariantId === comp.component_variant_id}
-                                                            <RefreshCw class="w-3.5 h-3.5 animate-spin" />
+                                                            <RefreshCw
+                                                                class="w-3.5 h-3.5 animate-spin"
+                                                            />
                                                         {:else}
-                                                            <Plus class="w-3.5 h-3.5" />
-                                                            <span>Tambah {comp.sku}</span>
+                                                            <Plus
+                                                                class="w-3.5 h-3.5"
+                                                            />
+                                                            <span
+                                                                >Tambah {comp.sku}</span
+                                                            >
                                                         {/if}
                                                     </button>
                                                 </div>
@@ -2406,29 +3475,51 @@
                                     {/each}
                                 {:else}
                                     <!-- Baris Reguler (Non-Bundle) -->
-                                    <tr class="hover:bg-rose-50/30 dark:hover:bg-rose-950/20 transition-colors">
-                                        <td class="p-3 text-center text-slate-400 text-[11px]">{idx + 1}</td>
+                                    <tr
+                                        class="hover:bg-rose-50/30 dark:hover:bg-rose-950/20 transition-colors"
+                                    >
+                                        <td
+                                            class="p-3 text-center text-slate-400 text-[11px]"
+                                            >{idx + 1}</td
+                                        >
                                         <td class="p-3">
-                                            <div class="font-bold text-slate-800 dark:text-slate-100 truncate max-w-sm">
-                                                {def.item.product_name || "Produk"}
+                                            <div
+                                                class="font-bold text-slate-800 dark:text-slate-100 truncate max-w-sm"
+                                            >
+                                                {def.item.product_name ||
+                                                    "Produk"}
                                             </div>
-                                            <div class="font-mono text-rose-600 dark:text-rose-400 font-semibold text-[11px] flex items-center gap-1.5 mt-0.5">
+                                            <div
+                                                class="font-mono text-rose-600 dark:text-rose-400 font-semibold text-[11px] flex items-center gap-1.5 mt-0.5"
+                                            >
                                                 <span>{def.item.sku}</span>
                                                 {#if def.item.size}
-                                                    <span class="px-1.5 py-0.2 rounded bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-[10px] font-bold">
+                                                    <span
+                                                        class="px-1.5 py-0.2 rounded bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-[10px] font-bold"
+                                                    >
                                                         {def.item.size}
                                                     </span>
                                                 {/if}
                                                 {#if def.item.color}
-                                                    <span class="text-slate-400 text-[10px]">({def.item.color})</span>
+                                                    <span
+                                                        class="text-slate-400 text-[10px]"
+                                                        >({def.item
+                                                            .color})</span
+                                                    >
                                                 {/if}
                                             </div>
                                         </td>
-                                        <td class="p-3 text-slate-600 dark:text-slate-400 truncate">
+                                        <td
+                                            class="p-3 text-slate-600 dark:text-slate-400 truncate"
+                                        >
                                             {def.item.seller_name || "Mitra"}
                                         </td>
                                         <td class="p-3 text-center">
-                                            <span class="px-2 py-1 rounded-md text-[11px] font-extrabold {def.isZero ? 'bg-rose-200 text-rose-900 dark:bg-rose-900/80 dark:text-rose-200' : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'}">
+                                            <span
+                                                class="px-2 py-1 rounded-md text-[11px] font-extrabold {def.isZero
+                                                    ? 'bg-rose-200 text-rose-900 dark:bg-rose-900/80 dark:text-rose-200'
+                                                    : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'}"
+                                            >
                                                 {def.avail} pcs
                                             </span>
                                         </td>
@@ -2436,50 +3527,89 @@
                                             <input
                                                 type="number"
                                                 min="1"
-                                                bind:value={formItems[def.index].qty}
+                                                bind:value={
+                                                    formItems[def.index].qty
+                                                }
                                                 class="w-16 text-center rounded-xl border border-rose-300 dark:border-rose-700 bg-white dark:bg-slate-900 py-1 text-xs font-extrabold text-rose-600 dark:text-rose-400 focus:ring-2 focus:ring-rose-500"
                                                 title="Ubah Qty Keluar jika diperlukan"
                                             />
                                         </td>
                                         <td class="p-3 text-center">
                                             {#if def.isZero}
-                                                <span class="text-[11px] font-extrabold text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/60 px-2 py-0.5 rounded-full border border-rose-200 dark:border-rose-800/60">
+                                                <span
+                                                    class="text-[11px] font-extrabold text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/60 px-2 py-0.5 rounded-full border border-rose-200 dark:border-rose-800/60"
+                                                >
                                                     Stok 0 (Kosong)
                                                 </span>
                                             {:else}
-                                                <span class="text-[11px] font-extrabold text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/60 px-2 py-0.5 rounded-full border border-amber-200 dark:border-amber-800/60">
+                                                <span
+                                                    class="text-[11px] font-extrabold text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/60 px-2 py-0.5 rounded-full border border-amber-200 dark:border-amber-800/60"
+                                                >
                                                     Kurang {def.diff} pcs
                                                 </span>
                                             {/if}
                                         </td>
                                         <td class="p-3 text-right">
-                                            <div class="flex items-center justify-end gap-1.5">
+                                            <div
+                                                class="flex items-center justify-end gap-1.5"
+                                            >
                                                 <div class="relative w-20">
                                                     <input
                                                         type="number"
                                                         min="1"
                                                         placeholder="Qty"
-                                                        value={adjustInputMap[def.item.product_variant_id!] ?? (def.diff > 0 ? def.diff : def.qtyOut)}
+                                                        value={adjustInputMap[
+                                                            def.item
+                                                                .product_variant_id!
+                                                        ] ??
+                                                            (def.diff > 0
+                                                                ? def.diff
+                                                                : def.qtyOut)}
                                                         oninput={(e) => {
-                                                            adjustInputMap[def.item.product_variant_id!] = Number((e.target as HTMLInputElement).value);
+                                                            adjustInputMap[
+                                                                def.item.product_variant_id!
+                                                            ] = Number(
+                                                                (
+                                                                    e.target as HTMLInputElement
+                                                                ).value,
+                                                            );
                                                         }}
                                                         class="w-full text-center rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 py-1 text-xs font-bold text-slate-800 dark:text-slate-100"
                                                     />
                                                 </div>
                                                 <button
                                                     type="button"
-                                                    disabled={adjustingVariantId === def.item.product_variant_id || !warehouseId}
+                                                    disabled={adjustingVariantId ===
+                                                        def.item
+                                                            .product_variant_id ||
+                                                        !warehouseId}
                                                     onclick={() => {
-                                                        const addQty = adjustInputMap[def.item.product_variant_id!] ?? (def.diff > 0 ? def.diff : def.qtyOut);
-                                                        handleQuickAdjustSingle(def.item.product_variant_id!, addQty, def.index);
+                                                        const addQty =
+                                                            adjustInputMap[
+                                                                def.item
+                                                                    .product_variant_id!
+                                                            ] ??
+                                                            (def.diff > 0
+                                                                ? def.diff
+                                                                : def.qtyOut);
+                                                        handleQuickAdjustSingle(
+                                                            def.item
+                                                                .product_variant_id!,
+                                                            addQty,
+                                                            def.index,
+                                                        );
                                                     }}
                                                     class="px-2.5 py-1 text-xs font-bold rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white flex items-center gap-1 transition-all shadow-xs shrink-0"
                                                     title="Tambah stok ke gudang asal sekarang"
                                                 >
                                                     {#if adjustingVariantId === def.item.product_variant_id}
-                                                        <RefreshCw class="w-3.5 h-3.5 animate-spin" />
+                                                        <RefreshCw
+                                                            class="w-3.5 h-3.5 animate-spin"
+                                                        />
                                                     {:else}
-                                                        <Plus class="w-3.5 h-3.5" />
+                                                        <Plus
+                                                            class="w-3.5 h-3.5"
+                                                        />
                                                         <span>Tambah Stok</span>
                                                     {/if}
                                                 </button>
@@ -2506,18 +3636,27 @@
                         class="text-sm font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2"
                     >
                         <Layers class="w-4 h-4 text-rose-500" />
-                        <span>Rincian Item Barang Keluar ({formItems.length} Baris)</span>
+                        <span
+                            >Rincian Item Barang Keluar ({formItems.length} Baris)</span
+                        >
                         {#if deficitItems.length > 0}
-                            <span class="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300">
+                            <span
+                                class="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300"
+                            >
                                 {deficitItems.length} Selisih / Stok 0
                             </span>
                         {/if}
                     </h3>
                     <p class="text-xs text-slate-400">
                         {#if filterOnlyDeficit}
-                            <span class="text-rose-600 dark:text-rose-400 font-bold">⚠️ Menampilkan hanya {deficitItems.length} produk dengan stok kosong / defisit.</span>
+                            <span
+                                class="text-rose-600 dark:text-rose-400 font-bold"
+                                >⚠️ Menampilkan hanya {deficitItems.length} produk
+                                dengan stok kosong / defisit.</span
+                            >
                         {:else}
-                            Dikelompokkan per-Mitra Seller dengan penentuan Vendor Konveksi & Harga Modal/Jual.
+                            Dikelompokkan per-Mitra Seller dengan penentuan
+                            Vendor Konveksi & Harga Modal/Jual.
                         {/if}
                     </p>
                 </div>
@@ -2526,20 +3665,26 @@
                     {#if deficitItems.length > 0}
                         <button
                             type="button"
-                            onclick={() => (filterOnlyDeficit = !filterOnlyDeficit)}
+                            onclick={() =>
+                                (filterOnlyDeficit = !filterOnlyDeficit)}
                             class="px-3 py-2 text-xs font-bold rounded-xl transition-all flex items-center gap-1.5 {filterOnlyDeficit
                                 ? 'bg-rose-600 text-white shadow-sm'
                                 : 'bg-rose-50 dark:bg-rose-950/50 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800'}"
                         >
                             <AlertTriangle class="w-3.5 h-3.5" />
-                            <span>{filterOnlyDeficit ? 'Tampilkan Semua Item' : `Hanya Stok 0 / Selisih (${deficitItems.length})`}</span>
+                            <span
+                                >{filterOnlyDeficit
+                                    ? "Tampilkan Semua Item"
+                                    : `Hanya Stok 0 / Selisih (${deficitItems.length})`}</span
+                            >
                         </button>
                     {/if}
 
                     {#if formItems.length > 0}
                         <button
                             type="button"
-                            onclick={() => (formItems = consolidateFormItems(formItems))}
+                            onclick={() =>
+                                (formItems = consolidateFormItems(formItems))}
                             class="px-3 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-semibold rounded-xl shadow-sm flex items-center gap-1.5 transition-all"
                             title="Ringkaskan item varian yang sama menjadi 1 baris"
                         >
@@ -2622,7 +3767,8 @@
                                     <th class="p-3 text-center w-24"
                                         >Stok Gudang</th
                                     >
-                                    <th class="p-3 text-center w-20">Qty Out</th>
+                                    <th class="p-3 text-center w-20">Qty Out</th
+                                    >
                                     <th class="p-3 text-right w-28"
                                         >HPP Modal (Rp)</th
                                     >
@@ -2649,21 +3795,45 @@
                                         class="hover:bg-white dark:hover:bg-slate-900 transition-colors"
                                     >
                                         <td class="p-3 text-slate-400"
-                                            >{index + 1}</td>
+                                            >{index + 1}</td
+                                        >
                                         <td class="p-3">
                                             {#if editingVariantIndex === index}
-                                                <div class="relative z-20 space-y-1.5 min-w-[280px]">
-                                                    <div class="flex items-center gap-1.5">
-                                                        <div class="relative flex-1">
+                                                <div
+                                                    class="relative z-20 space-y-1.5 min-w-[280px]"
+                                                >
+                                                    <div
+                                                        class="flex items-center gap-1.5"
+                                                    >
+                                                        <div
+                                                            class="relative flex-1"
+                                                        >
                                                             {#if isSearchingVariants}
-                                                                <RefreshCw class="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-rose-500 animate-spin" />
+                                                                <RefreshCw
+                                                                    class="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-rose-500 animate-spin"
+                                                                />
                                                             {:else}
-                                                                <Search class="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-rose-500" />
+                                                                <Search
+                                                                    class="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-rose-500"
+                                                                />
                                                             {/if}
                                                             <input
                                                                 type="text"
-                                                                bind:value={variantSearchQuery}
-                                                                oninput={(e) => onVariantSearchInput((e.target as HTMLInputElement).value, Number(item.seller_id || group.seller_id || sellerId) || null)}
+                                                                bind:value={
+                                                                    variantSearchQuery
+                                                                }
+                                                                oninput={(e) =>
+                                                                    onVariantSearchInput(
+                                                                        (
+                                                                            e.target as HTMLInputElement
+                                                                        ).value,
+                                                                        Number(
+                                                                            item.seller_id ||
+                                                                                group.seller_id ||
+                                                                                sellerId,
+                                                                        ) ||
+                                                                            null,
+                                                                    )}
                                                                 placeholder="Cari SKU / Nama / Size..."
                                                                 class="w-full rounded-xl border border-rose-400 dark:border-rose-600 bg-white dark:bg-slate-900 pl-8 pr-3 py-1.5 text-xs text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-rose-500 shadow-sm font-medium"
                                                             />
@@ -2671,136 +3841,245 @@
                                                         <button
                                                             type="button"
                                                             onclick={() => {
-                                                                editingVariantIndex = null;
-                                                                variantSearchQuery = "";
+                                                                editingVariantIndex =
+                                                                    null;
+                                                                variantSearchQuery =
+                                                                    "";
                                                             }}
                                                             class="p-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 shrink-0"
                                                             title="Tutup"
                                                         >
-                                                            <X class="w-4 h-4" />
+                                                            <X
+                                                                class="w-4 h-4"
+                                                            />
                                                         </button>
                                                     </div>
 
                                                     <!-- Info Produk Saat Ini yang Sedang Diubah -->
                                                     {#if item.product_name || item.sku}
-                                                        <div class="p-2.5 rounded-xl bg-amber-50/90 dark:bg-amber-950/40 border border-amber-200/90 dark:border-amber-800/70 text-xs shadow-xs space-y-1">
-                                                            <div class="flex items-center justify-between gap-1 text-[10px] font-bold text-amber-800 dark:text-amber-300">
-                                                                <span class="flex items-center gap-1">
-                                                                    <Tag class="w-3 h-3 text-amber-600 dark:text-amber-400" />
-                                                                    <span>Produk yang Mau Diubah:</span>
+                                                        <div
+                                                            class="p-2.5 rounded-xl bg-amber-50/90 dark:bg-amber-950/40 border border-amber-200/90 dark:border-amber-800/70 text-xs shadow-xs space-y-1"
+                                                        >
+                                                            <div
+                                                                class="flex items-center justify-between gap-1 text-[10px] font-bold text-amber-800 dark:text-amber-300"
+                                                            >
+                                                                <span
+                                                                    class="flex items-center gap-1"
+                                                                >
+                                                                    <Tag
+                                                                        class="w-3 h-3 text-amber-600 dark:text-amber-400"
+                                                                    />
+                                                                    <span
+                                                                        >Produk
+                                                                        yang Mau
+                                                                        Diubah:</span
+                                                                    >
                                                                 </span>
-                                                                <span class="text-[9px] font-medium text-amber-700/80 dark:text-amber-400/80">
-                                                                    (Klik nama/SKU untuk cari)
+                                                                <span
+                                                                    class="text-[9px] font-medium text-amber-700/80 dark:text-amber-400/80"
+                                                                >
+                                                                    (Klik
+                                                                    nama/SKU
+                                                                    untuk cari)
                                                                 </span>
                                                             </div>
-                                                            
-                                                            <div class="flex items-center justify-between gap-2">
+
+                                                            <div
+                                                                class="flex items-center justify-between gap-2"
+                                                            >
                                                                 <button
                                                                     type="button"
                                                                     onclick={() => {
-                                                                        if (item.product_name) {
-                                                                            variantSearchQuery = item.product_name;
-                                                                            onVariantSearchInput(variantSearchQuery, Number(item.seller_id || group.seller_id || sellerId) || null);
+                                                                        if (
+                                                                            item.product_name
+                                                                        ) {
+                                                                            variantSearchQuery =
+                                                                                item.product_name;
+                                                                            onVariantSearchInput(
+                                                                                variantSearchQuery,
+                                                                                Number(
+                                                                                    item.seller_id ||
+                                                                                        group.seller_id ||
+                                                                                        sellerId,
+                                                                                ) ||
+                                                                                    null,
+                                                                            );
                                                                         }
                                                                     }}
                                                                     class="font-bold text-slate-800 dark:text-slate-100 truncate text-[11px] text-left hover:text-rose-600 dark:hover:text-rose-400 hover:underline transition-colors cursor-pointer"
                                                                     title="Klik untuk mencari berdasarkan nama produk ini"
                                                                 >
-                                                                    {item.product_name || "Varian Tidak Dikenal"}
+                                                                    {item.product_name ||
+                                                                        "Varian Tidak Dikenal"}
                                                                 </button>
                                                                 {#if item.available_stock !== undefined}
-                                                                    <span class="text-[10px] px-1.5 py-0.5 rounded font-extrabold shrink-0 {item.available_stock <= 0 ? 'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300' : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300'}">
-                                                                        Stok: {item.available_stock} pcs
+                                                                    <span
+                                                                        class="text-[10px] px-1.5 py-0.5 rounded font-extrabold shrink-0 {item.available_stock <=
+                                                                        0
+                                                                            ? 'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300'
+                                                                            : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300'}"
+                                                                    >
+                                                                        Stok: {item.available_stock}
+                                                                        pcs
                                                                     </span>
                                                                 {/if}
                                                             </div>
 
-                                                            <div class="font-mono text-rose-600 dark:text-rose-400 font-semibold text-[10px] flex items-center flex-wrap gap-1.5">
+                                                            <div
+                                                                class="font-mono text-rose-600 dark:text-rose-400 font-semibold text-[10px] flex items-center flex-wrap gap-1.5"
+                                                            >
                                                                 <button
                                                                     type="button"
                                                                     onclick={() => {
-                                                                        if (item.sku) {
-                                                                            variantSearchQuery = item.sku;
-                                                                            onVariantSearchInput(variantSearchQuery, Number(item.seller_id || group.seller_id || sellerId) || null);
+                                                                        if (
+                                                                            item.sku
+                                                                        ) {
+                                                                            variantSearchQuery =
+                                                                                item.sku;
+                                                                            onVariantSearchInput(
+                                                                                variantSearchQuery,
+                                                                                Number(
+                                                                                    item.seller_id ||
+                                                                                        group.seller_id ||
+                                                                                        sellerId,
+                                                                                ) ||
+                                                                                    null,
+                                                                            );
                                                                         }
                                                                     }}
                                                                     class="hover:underline cursor-pointer"
                                                                     title="Klik untuk mencari SKU ini"
                                                                 >
-                                                                    {item.sku || '-'}
+                                                                    {item.sku ||
+                                                                        "-"}
                                                                 </button>
                                                                 {#if item.size}
-                                                                    <span class="px-1.5 py-0.2 rounded bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-bold text-[10px]">
+                                                                    <span
+                                                                        class="px-1.5 py-0.2 rounded bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-bold text-[10px]"
+                                                                    >
                                                                         {item.size}
                                                                     </span>
                                                                 {/if}
                                                                 {#if item.color}
-                                                                    <span class="text-slate-400 text-[10px]">({item.color})</span>
+                                                                    <span
+                                                                        class="text-slate-400 text-[10px]"
+                                                                        >({item.color})</span
+                                                                    >
                                                                 {/if}
                                                             </div>
                                                         </div>
                                                     {/if}
 
                                                     <!-- Filtered Variants Search List -->
-                                                    <div class="max-h-48 overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-xl divide-y divide-slate-100 dark:divide-slate-800">
+                                                    <div
+                                                        class="max-h-48 overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-xl divide-y divide-slate-100 dark:divide-slate-800"
+                                                    >
                                                         {#each searchResults.slice(0, 30) as v}
                                                             <button
                                                                 type="button"
                                                                 onclick={() => {
-                                                                    handleVariantSelect(index, v);
-                                                                    editingVariantIndex = null;
-                                                                    variantSearchQuery = "";
+                                                                    handleVariantSelect(
+                                                                        index,
+                                                                        v,
+                                                                    );
+                                                                    editingVariantIndex =
+                                                                        null;
+                                                                    variantSearchQuery =
+                                                                        "";
                                                                 }}
-                                                                class="w-full text-left p-2 hover:bg-rose-50 dark:hover:bg-rose-950/50 transition-colors flex items-center justify-between gap-2 {v.id === item.product_variant_id ? 'bg-amber-50/60 dark:bg-amber-950/30' : ''}"
+                                                                class="w-full text-left p-2 hover:bg-rose-50 dark:hover:bg-rose-950/50 transition-colors flex items-center justify-between gap-2 {v.id ===
+                                                                item.product_variant_id
+                                                                    ? 'bg-amber-50/60 dark:bg-amber-950/30'
+                                                                    : ''}"
                                                             >
-                                                                <div class="truncate">
-                                                                    <div class="font-bold text-slate-800 dark:text-slate-100 truncate flex items-center gap-1.5">
-                                                                        <span>{v.product_name}</span>
+                                                                <div
+                                                                    class="truncate"
+                                                                >
+                                                                    <div
+                                                                        class="font-bold text-slate-800 dark:text-slate-100 truncate flex items-center gap-1.5"
+                                                                    >
+                                                                        <span
+                                                                            >{v.product_name}</span
+                                                                        >
                                                                         {#if v.id === item.product_variant_id}
-                                                                            <span class="px-1.5 py-0.2 rounded bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-300 text-[9px] font-bold shrink-0">
-                                                                                Pilihan Saat Ini
+                                                                            <span
+                                                                                class="px-1.5 py-0.2 rounded bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-300 text-[9px] font-bold shrink-0"
+                                                                            >
+                                                                                Pilihan
+                                                                                Saat
+                                                                                Ini
                                                                             </span>
                                                                         {/if}
                                                                     </div>
-                                                                    <div class="font-mono text-[11px] text-rose-600 dark:text-rose-400 font-semibold flex items-center gap-1.5">
-                                                                        <span>{v.sku}</span>
-                                                                        <span class="px-1.5 py-0.2 rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-[10px] font-bold">
+                                                                    <div
+                                                                        class="font-mono text-[11px] text-rose-600 dark:text-rose-400 font-semibold flex items-center gap-1.5"
+                                                                    >
+                                                                        <span
+                                                                            >{v.sku}</span
+                                                                        >
+                                                                        <span
+                                                                            class="px-1.5 py-0.2 rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-[10px] font-bold"
+                                                                        >
                                                                             {v.size}
                                                                         </span>
                                                                         {#if v.color}
-                                                                            <span class="text-slate-400 text-[10px]">({v.color})</span>
+                                                                            <span
+                                                                                class="text-slate-400 text-[10px]"
+                                                                                >({v.color})</span
+                                                                            >
                                                                         {/if}
                                                                     </div>
                                                                 </div>
-                                                                <span class="text-[10px] font-extrabold px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-500 shrink-0">
-                                                                    {v.stocks[Number(warehouseId)] ?? 0} pcs
+                                                                <span
+                                                                    class="text-[10px] font-extrabold px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-500 shrink-0"
+                                                                >
+                                                                    {v.stocks[
+                                                                        Number(
+                                                                            warehouseId,
+                                                                        )
+                                                                    ] ?? 0} pcs
                                                                 </span>
                                                             </button>
                                                         {:else}
-                                                            <div class="p-3 text-center text-slate-400 text-xs italic">
+                                                            <div
+                                                                class="p-3 text-center text-slate-400 text-xs italic"
+                                                            >
                                                                 {#if isSearchingVariants}
-                                                                    Sedang mencari data varian...
+                                                                    Sedang
+                                                                    mencari data
+                                                                    varian...
                                                                 {:else if variantSearchQuery.trim()}
-                                                                    Tidak ada varian cocok dengan "{variantSearchQuery}"
+                                                                    Tidak ada
+                                                                    varian cocok
+                                                                    dengan "{variantSearchQuery}"
                                                                 {:else}
-                                                                    Ketik SKU atau nama produk untuk mencari varian...
+                                                                    Ketik SKU
+                                                                    atau nama
+                                                                    produk untuk
+                                                                    mencari
+                                                                    varian...
                                                                 {/if}
                                                             </div>
                                                         {/each}
                                                     </div>
                                                 </div>
                                             {:else if item.product_variant_id}
-                                                <div class="flex items-center justify-between gap-2 group">
+                                                <div
+                                                    class="flex items-center justify-between gap-2 group"
+                                                >
                                                     <div>
                                                         <div
                                                             class="font-bold text-slate-800 dark:text-slate-100"
                                                         >
-                                                            {item.product_name || "Varian Tidak Dikenal"}
+                                                            {item.product_name ||
+                                                                "Varian Tidak Dikenal"}
                                                         </div>
                                                         <div
                                                             class="font-mono text-rose-600 dark:text-rose-400 font-semibold text-[11px] flex items-center gap-1.5 mt-0.5"
                                                         >
-                                                            <span>{item.sku}</span>
+                                                            <span
+                                                                >{item.sku}</span
+                                                            >
                                                             {#if item.size}
                                                                 <span
                                                                     class="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-[10px] font-bold"
@@ -2809,31 +4088,54 @@
                                                                 </span>
                                                             {/if}
                                                             {#if item.color}
-                                                                <span class="text-slate-400 text-[10px]"
+                                                                <span
+                                                                    class="text-slate-400 text-[10px]"
                                                                     >({item.color})</span
                                                                 >
                                                             {/if}
                                                         </div>
                                                     </div>
 
-                                                    <button
-                                                        type="button"
-                                                        onclick={() => openVariantSelector(index, Number(item.seller_id || group.seller_id || sellerId) || null)}
-                                                        class="px-2 py-1 bg-slate-100 dark:bg-slate-800 hover:bg-rose-50 dark:hover:bg-rose-950/50 text-slate-600 hover:text-rose-600 dark:text-slate-400 dark:hover:text-rose-400 text-[11px] font-bold rounded-lg transition-all flex items-center gap-1 shrink-0 border border-slate-200 dark:border-slate-700"
-                                                        title="Ubah Produk / Size"
-                                                    >
-                                                        <Edit2 class="w-3 h-3 text-rose-500" />
-                                                        <span>Ubah</span>
-                                                    </button>
+                                                    <div class="flex items-center gap-1 shrink-0">
+                                                        <button
+                                                            type="button"
+                                                            onclick={() => openVariantSelector(index, Number(item.seller_id || group.seller_id || sellerId) || null)}
+                                                            class="px-2 py-1 bg-slate-100 dark:bg-slate-800 hover:bg-rose-50 dark:hover:bg-rose-950/50 text-slate-600 hover:text-rose-600 dark:text-slate-400 dark:hover:text-rose-400 text-[11px] font-bold rounded-lg transition-all flex items-center gap-1 shrink-0 border border-slate-200 dark:border-slate-700"
+                                                            title="Ubah Produk / Size"
+                                                        >
+                                                            <Edit2 class="w-3 h-3 text-rose-500" />
+                                                            <span>Ubah</span>
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            onclick={() => insertManualItemAfter(index, item)}
+                                                            class="px-2 py-1 bg-emerald-50 dark:bg-emerald-950/50 hover:bg-emerald-100 dark:hover:bg-emerald-900/60 text-emerald-700 dark:text-emerald-300 text-[11px] font-bold rounded-lg transition-all flex items-center gap-1 shrink-0 border border-emerald-200 dark:border-emerald-800"
+                                                            title="Tambah baris produk baru tepat di bawah produk ini"
+                                                        >
+                                                            <Plus class="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
+                                                            <span>Tambah</span>
+                                                        </button>
+                                                    </div>
                                                 </div>
                                             {:else}
                                                 <button
                                                     type="button"
-                                                    onclick={() => openVariantSelector(index, Number(item.seller_id || group.seller_id || sellerId) || null)}
+                                                    onclick={() =>
+                                                        openVariantSelector(
+                                                            index,
+                                                            Number(
+                                                                item.seller_id ||
+                                                                    group.seller_id ||
+                                                                    sellerId,
+                                                            ) || null,
+                                                        )}
                                                     class="w-full py-2 px-3 border border-dashed border-rose-300 dark:border-rose-700 hover:border-rose-500 rounded-xl text-rose-600 dark:text-rose-400 hover:bg-rose-50/50 dark:hover:bg-rose-950/30 flex items-center justify-center gap-2 text-xs font-semibold transition-all"
                                                 >
-                                                    <Search class="w-3.5 h-3.5" />
-                                                    <span>Pilih Varian SKU</span>
+                                                    <Search
+                                                        class="w-3.5 h-3.5"
+                                                    />
+                                                    <span>Pilih Varian SKU</span
+                                                    >
                                                 </button>
                                             {/if}
                                         </td>
@@ -2876,16 +4178,56 @@
                                                 class="w-16 text-center rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 py-1.5 text-xs font-bold text-rose-600 dark:text-rose-400"
                                             />
                                         </td>
-                                        <td class="p-3 text-right font-medium text-slate-600 dark:text-slate-400">
+                                        <td
+                                            class="p-3 text-right font-medium text-slate-600 dark:text-slate-400"
+                                        >
                                             {formatRupiah(item.price)}
                                         </td>
                                         <td
                                             class="p-3 text-right font-semibold text-slate-700 dark:text-slate-300"
                                         >
-                                            {formatRupiah(item.qty * item.price)}
+                                            {formatRupiah(
+                                                item.qty * item.price,
+                                            )}
                                         </td>
-                                        <td class="p-3 text-right font-semibold text-cyan-600 dark:text-cyan-400">
-                                            {formatRupiah(item.selling_price)}
+                                        <td
+                                            class="p-3 text-right font-semibold text-cyan-600 dark:text-cyan-400"
+                                        >
+                                            {#if editingSellingPriceIndex === index}
+                                                <div class="flex items-center justify-end gap-1">
+                                                    <input
+                                                        type="number"
+                                                        step="any"
+                                                        min="0"
+                                                        bind:value={item.selling_price}
+                                                        onkeydown={(e) => {
+                                                            if (e.key === "Enter" || e.key === "Escape") {
+                                                                editingSellingPriceIndex = null;
+                                                            }
+                                                        }}
+                                                        onblur={() => (editingSellingPriceIndex = null)}
+                                                        class="w-28 text-right rounded-xl border border-cyan-400 dark:border-cyan-600 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs font-bold text-cyan-700 dark:text-cyan-300 focus:outline-none focus:ring-2 focus:ring-cyan-500 shadow-xs"
+                                                    />
+                                                    <button
+                                                        type="button"
+                                                        onclick={() => (editingSellingPriceIndex = null)}
+                                                        class="p-1 rounded-lg bg-emerald-100 dark:bg-emerald-950/80 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-200 transition-colors"
+                                                        title="Selesai Edit Harga Jual"
+                                                    >
+                                                        <Check class="w-3.5 h-3.5" />
+                                                    </button>
+                                                </div>
+                                            {:else}
+                                                <button
+                                                    type="button"
+                                                    onclick={() => (editingSellingPriceIndex = index)}
+                                                    class="inline-flex items-center justify-end gap-1.5 px-2 py-1 rounded-lg hover:bg-cyan-50 dark:hover:bg-cyan-950/40 border border-transparent hover:border-cyan-200 dark:hover:border-cyan-800/60 transition-all group/price cursor-pointer"
+                                                    title="Klik untuk mengedit Harga Jual"
+                                                >
+                                                    <span>{formatRupiah(item.selling_price)}</span>
+                                                    <Edit2 class="w-3 h-3 text-slate-400 group-hover/price:text-cyan-600 dark:group-hover/price:text-cyan-400 opacity-60 group-hover/price:opacity-100 transition-opacity shrink-0" />
+                                                </button>
+                                            {/if}
                                         </td>
                                         <td
                                             class="p-3 text-right font-bold text-slate-800 dark:text-slate-100"
@@ -2895,9 +4237,17 @@
                                             )}
                                         </td>
                                         <td
-                                            class="p-3 text-right font-extrabold {(item.qty * item.selling_price) - (item.qty * item.price) >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}"
+                                            class="p-3 text-right font-extrabold {item.qty *
+                                                item.selling_price -
+                                                item.qty * item.price >=
+                                            0
+                                                ? 'text-emerald-600 dark:text-emerald-400'
+                                                : 'text-rose-600 dark:text-rose-400'}"
                                         >
-                                            {formatRupiah((item.qty * item.selling_price) - (item.qty * item.price))}
+                                            {formatRupiah(
+                                                item.qty * item.selling_price -
+                                                    item.qty * item.price,
+                                            )}
                                         </td>
                                         <td class="p-3 text-center">
                                             <button
@@ -2942,19 +4292,31 @@
                             class="text-sm font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2 flex-wrap"
                         >
                             <FileText class="w-4 h-4 text-emerald-500" />
-                            <span>Daftar Summary No. Resi & Order ({resiList.length} Transaksi)</span>
+                            <span
+                                >Daftar Summary No. Resi & Order ({resiList.length}
+                                Transaksi)</span
+                            >
                             {#if hasResiPayments}
-                                <span class="text-xs font-black px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
-                                    Total Pencairan: {formatRupiah(totalResiPayment)}
+                                <span
+                                    class="text-xs font-black px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
+                                >
+                                    Total Pencairan: {formatRupiah(
+                                        totalResiPayment,
+                                    )}
                                 </span>
                             {/if}
                         </h3>
                         <p class="text-xs text-slate-400 mt-0.5">
-                            Daftar resi pesanan yang terasosiasi dengan pengeluaran stok ini. Anda dapat mengedit Order ID, No. Resi, maupun Nilai Pembayaran (termasuk nilai minus untuk pengurangan/koreksi).
+                            Daftar resi pesanan yang terasosiasi dengan
+                            pengeluaran stok ini. Anda dapat mengedit Order ID,
+                            No. Resi, maupun Nilai Pembayaran (termasuk nilai
+                            minus untuk pengurangan/koreksi).
                         </p>
                     </div>
 
-                    <div class="flex items-center gap-2.5 flex-wrap sm:flex-nowrap">
+                    <div
+                        class="flex items-center gap-2.5 flex-wrap sm:flex-nowrap"
+                    >
                         <div class="relative w-full sm:w-64">
                             <Search
                                 class="w-3.5 h-3.5 absolute left-3 top-2.5 text-slate-400"
@@ -2997,8 +4359,12 @@
                                 class="border-b border-slate-200 dark:border-slate-800 text-slate-500 font-bold bg-slate-50 dark:bg-slate-950"
                             >
                                 <th class="p-2.5 w-12 text-center">No</th>
-                                <th class="p-2.5 min-w-[200px]">Order ID / No Pesanan</th>
-                                <th class="p-2.5 min-w-[200px]">No. Resi Marketplace</th>
+                                <th class="p-2.5 min-w-[200px]"
+                                    >Order ID / No Pesanan</th
+                                >
+                                <th class="p-2.5 min-w-[200px]"
+                                    >No. Resi Marketplace</th
+                                >
                                 <th class="p-2.5 text-right min-w-[180px]"
                                     >Nilai Pembayaran (Rp)</th
                                 >
@@ -3012,7 +4378,8 @@
                                 <tr
                                     class="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors"
                                 >
-                                    <td class="p-2.5 text-slate-400 text-center font-medium"
+                                    <td
+                                        class="p-2.5 text-slate-400 text-center font-medium"
                                         >{(resiPage - 1) * resiPerPage +
                                             idx +
                                             1}</td
@@ -3034,16 +4401,30 @@
                                         />
                                     </td>
                                     <td class="p-2 text-right">
-                                        <div class="flex flex-col items-end gap-0.5">
+                                        <div
+                                            class="flex flex-col items-end gap-0.5"
+                                        >
                                             <input
                                                 type="number"
                                                 step="any"
                                                 bind:value={r.payment}
                                                 placeholder="0"
-                                                class="w-full max-w-[160px] text-right px-2.5 py-1.5 text-xs font-bold rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 {Number(r.payment) < 0 ? 'text-rose-600 dark:text-rose-400 font-black' : 'text-emerald-600 dark:text-emerald-400 font-bold'}"
+                                                class="w-full max-w-[160px] text-right px-2.5 py-1.5 text-xs font-bold rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 {Number(
+                                                    r.payment,
+                                                ) < 0
+                                                    ? 'text-rose-600 dark:text-rose-400 font-black'
+                                                    : 'text-emerald-600 dark:text-emerald-400 font-bold'}"
                                             />
-                                            <span class="text-[10px] font-semibold {Number(r.payment) < 0 ? 'text-rose-500 dark:text-rose-400' : 'text-slate-400'}">
-                                                {formatRupiah(Number(r.payment) || 0)}
+                                            <span
+                                                class="text-[10px] font-semibold {Number(
+                                                    r.payment,
+                                                ) < 0
+                                                    ? 'text-rose-500 dark:text-rose-400'
+                                                    : 'text-slate-400'}"
+                                            >
+                                                {formatRupiah(
+                                                    Number(r.payment) || 0,
+                                                )}
                                             </span>
                                         </div>
                                     </td>
@@ -3060,11 +4441,17 @@
                                 </tr>
                             {:else}
                                 <tr>
-                                    <td colspan="5" class="p-6 text-center text-slate-400 italic">
+                                    <td
+                                        colspan="5"
+                                        class="p-6 text-center text-slate-400 italic"
+                                    >
                                         {#if resiSearch.trim()}
-                                            Tidak ada resi yang cocok dengan pencarian "{resiSearch}".
+                                            Tidak ada resi yang cocok dengan
+                                            pencarian "{resiSearch}".
                                         {:else}
-                                            Belum ada nomor resi yang terdaftar. Klik tombol "+ Tambah Resi Manual" di atas untuk menambahkan.
+                                            Belum ada nomor resi yang terdaftar.
+                                            Klik tombol "+ Tambah Resi Manual"
+                                            di atas untuk menambahkan.
                                         {/if}
                                     </td>
                                 </tr>
@@ -3072,12 +4459,23 @@
                         </tbody>
                         {#if resiList.length > 0}
                             <tfoot>
-                                <tr class="border-t-2 border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-900/80 font-bold text-xs">
-                                    <td colspan="3" class="p-3 text-right text-slate-600 dark:text-slate-300">
-                                        Total Nilai Pencairan ({resiList.length} Transaksi):
+                                <tr
+                                    class="border-t-2 border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-900/80 font-bold text-xs"
+                                >
+                                    <td
+                                        colspan="3"
+                                        class="p-3 text-right text-slate-600 dark:text-slate-300"
+                                    >
+                                        Total Nilai Pencairan ({resiList.length}
+                                        Transaksi):
                                     </td>
                                     <td class="p-3 text-right">
-                                        <span class="text-sm font-black {totalResiPayment < 0 ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'}">
+                                        <span
+                                            class="text-sm font-black {totalResiPayment <
+                                            0
+                                                ? 'text-rose-600 dark:text-rose-400'
+                                                : 'text-emerald-600 dark:text-emerald-400'}"
+                                        >
                                             {formatRupiah(totalResiPayment)}
                                         </span>
                                     </td>
@@ -3092,7 +4490,8 @@
                 {#if totalResiPages > 1}
                     <div class="flex items-center justify-between text-xs pt-2">
                         <span class="text-slate-400"
-                            >Menampilkan Halaman {resiPage} dari {totalResiPages} ({filteredResis.length} Transaksi)</span
+                            >Menampilkan Halaman {resiPage} dari {totalResiPages}
+                            ({filteredResis.length} Transaksi)</span
                         >
                         <div class="flex items-center gap-1">
                             <button
@@ -3118,22 +4517,41 @@
             class="sticky bottom-0 z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-t border-slate-200 dark:border-slate-800 shadow-2xl rounded-t-2xl overflow-hidden"
         >
             {#if hasDiscrepancyAlert}
-                <div class="px-5 py-2.5 bg-amber-50 dark:bg-amber-950/60 border-b border-amber-200 dark:border-amber-900/40 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
-                    <div class="flex items-center gap-2 text-amber-900 dark:text-amber-200 font-bold">
-                        <AlertTriangle class="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 animate-pulse" />
+                <div
+                    class="px-5 py-2.5 bg-amber-50 dark:bg-amber-950/60 border-b border-amber-200 dark:border-amber-900/40 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs"
+                >
+                    <div
+                        class="flex items-center gap-2 text-amber-900 dark:text-amber-200 font-bold"
+                    >
+                        <AlertTriangle
+                            class="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 animate-pulse"
+                        />
                         <span>
-                            Peringatan: Ada {missingSkusList.length} SKU ({totalMissingPcs} pcs) senilai {formatRupiah(totalMissingAmount || Math.abs(filePencairanDiff))} belum terdaftar.
+                            Peringatan: Ada {missingSkusList.length} SKU ({totalMissingPcs}
+                            pcs) senilai {formatRupiah(
+                                totalMissingAmount ||
+                                    Math.abs(filePencairanDiff),
+                            )} belum terdaftar.
                         </span>
-                        <span class="font-normal text-amber-700 dark:text-amber-300 hidden md:inline">
-                            Transaksi akan disimpan hanya mencatat {liveTotalQty} pcs senilai {formatRupiah(liveTotalSelling)}.
+                        <span
+                            class="font-normal text-amber-700 dark:text-amber-300 hidden md:inline"
+                        >
+                            Transaksi akan disimpan hanya mencatat {liveTotalQty}
+                            pcs senilai {formatRupiah(liveTotalSelling)}.
                         </span>
                     </div>
                     {#if missingSkusList.length > 0}
                         <button
                             type="button"
                             onclick={() => {
-                                const el = document.getElementById("section-missing-skus");
-                                if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+                                const el = document.getElementById(
+                                    "section-missing-skus",
+                                );
+                                if (el)
+                                    el.scrollIntoView({
+                                        behavior: "smooth",
+                                        block: "start",
+                                    });
                             }}
                             class="text-amber-700 dark:text-amber-300 font-extrabold underline hover:text-amber-900 dark:hover:text-amber-100 shrink-0 self-start sm:self-auto"
                         >
@@ -3146,135 +4564,184 @@
                 <div
                     class="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4"
                 >
-                <div
-                    class="flex flex-wrap items-center gap-3 text-xs font-semibold text-slate-600 dark:text-slate-400"
-                >
-                    <span
-                        >Total Qty: <strong
-                            class="text-rose-600 dark:text-rose-400 text-sm font-black"
-                            >{liveTotalQty} pcs</strong
-                        ></span
+                    <div
+                        class="flex flex-wrap items-center gap-3 text-xs font-semibold text-slate-600 dark:text-slate-400"
                     >
-                    <span class="hidden md:inline">|</span>
-                    <span class="hidden md:inline"
-                        >Bruto: <strong
-                            class="text-emerald-600 dark:text-emerald-400 font-black"
-                            >{formatRupiah(liveBruto)}</strong
-                        ></span
-                    >
-                    <span class="hidden md:inline">|</span>
-                    <span class="hidden md:inline"
-                        >Pencairan: <strong
-                            class="text-cyan-600 dark:text-cyan-400 font-black"
-                            >{formatRupiah(liveTotalSelling)}</strong
-                        ></span
-                    >
-                </div>
+                        <span
+                            >Total Qty: <strong
+                                class="text-rose-600 dark:text-rose-400 text-sm font-black"
+                                >{liveTotalQty} pcs</strong
+                            ></span
+                        >
+                        <span class="hidden md:inline">|</span>
+                        <span class="hidden md:inline"
+                            >Bruto: <strong
+                                class="text-emerald-600 dark:text-emerald-400 font-black"
+                                >{formatRupiah(liveBruto)}</strong
+                            ></span
+                        >
+                        <span class="hidden md:inline">|</span>
+                        <span class="hidden md:inline"
+                            >Pencairan: <strong
+                                class="text-cyan-600 dark:text-cyan-400 font-black"
+                                >{formatRupiah(liveTotalSelling)}</strong
+                            ></span
+                        >
+                    </div>
 
-                <div
-                    class="flex items-center gap-3 w-full sm:w-auto justify-end"
-                >
-                    <Link
-                        href="/superadmin/warehouse/stock-out"
-                        class="px-5 py-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 text-slate-700 dark:text-slate-200 font-bold text-xs rounded-xl transition-all"
+                    <div
+                        class="flex items-center gap-3 w-full sm:w-auto justify-end"
                     >
-                        Batal
-                    </Link>
+                        <Link
+                            href="/superadmin/warehouse/stock-out"
+                            class="px-5 py-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 text-slate-700 dark:text-slate-200 font-bold text-xs rounded-xl transition-all"
+                        >
+                            Batal
+                        </Link>
 
-                    <button
-                        onclick={submitForm}
-                        disabled={isSubmitting || formItems.length === 0}
-                        class="px-6 py-2.5 bg-gradient-to-r from-rose-600 to-pink-600 hover:from-rose-500 hover:to-pink-500 disabled:opacity-50 text-white font-extrabold text-xs rounded-xl shadow-lg shadow-rose-600/30 flex items-center gap-2 transition-all"
-                    >
-                        {#if isSubmitting}
-                            <RefreshCw class="w-4 h-4 animate-spin" />
-                            <span>Menyimpan Transaksi...</span>
-                        {:else}
-                            <Save class="w-4 h-4" />
-                            <span
-                                >{isEdit
-                                    ? "Perbarui Transaksi Stock Out"
-                                    : "Simpan Transaksi Stock Out"}</span
-                            >
-                        {/if}
-                    </button>
+                        <button
+                            onclick={submitForm}
+                            disabled={isSubmitting || formItems.length === 0}
+                            class="px-6 py-2.5 bg-gradient-to-r from-rose-600 to-pink-600 hover:from-rose-500 hover:to-pink-500 disabled:opacity-50 text-white font-extrabold text-xs rounded-xl shadow-lg shadow-rose-600/30 flex items-center gap-2 transition-all"
+                        >
+                            {#if isSubmitting}
+                                <RefreshCw class="w-4 h-4 animate-spin" />
+                                <span>Menyimpan Transaksi...</span>
+                            {:else}
+                                <Save class="w-4 h-4" />
+                                <span
+                                    >{isEdit
+                                        ? "Perbarui Transaksi Stock Out"
+                                        : "Simpan Transaksi Stock Out"}</span
+                                >
+                            {/if}
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>
-    </div>
 
-    <!-- Modal Spinner Loading: Chunked Import Streaming -->
-    {#if isImporting}
-        <div
-            class="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-sm flex items-center justify-center p-4"
-        >
+        <!-- Modal Spinner Loading: Chunked Import Streaming -->
+        {#if isImporting}
             <div
-                class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-8 max-w-md w-full shadow-2xl text-center space-y-6"
+                class="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-sm flex items-center justify-center p-4"
             >
-                <!-- Animated Spinner & Pulse Ring -->
-                <div class="relative w-20 h-20 mx-auto flex items-center justify-center">
-                    <div class="absolute inset-0 rounded-full bg-cyan-500/20 animate-ping"></div>
-                    <div class="w-16 h-16 rounded-2xl bg-gradient-to-tr from-cyan-500 to-rose-500 p-0.5 flex items-center justify-center shadow-lg shadow-cyan-500/30">
-                        <div class="w-full h-full bg-white dark:bg-slate-900 rounded-[14px] flex items-center justify-center">
-                            <RefreshCw class="w-8 h-8 text-cyan-500 animate-spin" />
+                <div
+                    class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-8 max-w-md w-full shadow-2xl text-center space-y-6"
+                >
+                    <!-- Animated Spinner & Pulse Ring -->
+                    <div
+                        class="relative w-20 h-20 mx-auto flex items-center justify-center"
+                    >
+                        <div
+                            class="absolute inset-0 rounded-full bg-cyan-500/20 animate-ping"
+                        ></div>
+                        <div
+                            class="w-16 h-16 rounded-2xl bg-gradient-to-tr from-cyan-500 to-rose-500 p-0.5 flex items-center justify-center shadow-lg shadow-cyan-500/30"
+                        >
+                            <div
+                                class="w-full h-full bg-white dark:bg-slate-900 rounded-[14px] flex items-center justify-center"
+                            >
+                                <RefreshCw
+                                    class="w-8 h-8 text-cyan-500 animate-spin"
+                                />
+                            </div>
                         </div>
                     </div>
-                </div>
 
-                <!-- Text & Subtitle -->
-                <div class="space-y-1.5">
-                    <h3 class="text-base font-extrabold text-slate-800 dark:text-slate-100">
-                        Proses Chunked Import Streaming...
-                    </h3>
-                    <p class="text-xs font-medium text-slate-500 dark:text-slate-400 leading-relaxed">
-                        {importStatusText || "Memproses dan mencocokkan SKU pesanan dengan stok gudang..."}
+                    <!-- Text & Subtitle -->
+                    <div class="space-y-1.5">
+                        <h3
+                            class="text-base font-extrabold text-slate-800 dark:text-slate-100"
+                        >
+                            Proses Chunked Import Streaming...
+                        </h3>
+                        <p
+                            class="text-xs font-medium text-slate-500 dark:text-slate-400 leading-relaxed"
+                        >
+                            {importStatusText ||
+                                "Memproses dan mencocokkan SKU pesanan dengan stok gudang..."}
+                        </p>
+                    </div>
+
+                    <!-- Progress Bar & Percentage -->
+                    <div class="space-y-2">
+                        <div
+                            class="flex justify-between items-center text-xs font-bold"
+                        >
+                            <span class="text-slate-600 dark:text-slate-300">
+                                Chunk {importCurrentChunk} dari {importTotalChunks ||
+                                    1}
+                            </span>
+                            <span
+                                class="text-cyan-600 dark:text-cyan-400 text-sm"
+                            >
+                                {importProgress}%
+                            </span>
+                        </div>
+                        <div
+                            class="w-full bg-slate-100 dark:bg-slate-800 h-3 rounded-full overflow-hidden p-0.5 border border-slate-200/50 dark:border-slate-700/50"
+                        >
+                            <div
+                                class="bg-gradient-to-r from-cyan-500 via-rose-500 to-pink-500 h-full transition-all duration-300 rounded-full"
+                                style="width: {importProgress}%"
+                            ></div>
+                        </div>
+                    </div>
+
+                    <!-- Live Metrics Grid -->
+                    <div
+                        class="grid grid-cols-3 gap-2 pt-2 border-t border-slate-100 dark:border-slate-800 text-center"
+                    >
+                        <div
+                            class="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-slate-100 dark:border-slate-800/60"
+                        >
+                            <span
+                                class="text-[10px] font-bold text-slate-400 block uppercase"
+                                >Total Data</span
+                            >
+                            <span
+                                class="text-xs font-extrabold text-slate-700 dark:text-slate-200 font-mono"
+                            >
+                                {importTotalItems}
+                            </span>
+                        </div>
+                        <div
+                            class="p-2.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-100 dark:border-emerald-900/40"
+                        >
+                            <span
+                                class="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 block uppercase"
+                                >Matched</span
+                            >
+                            <span
+                                class="text-xs font-extrabold text-emerald-700 dark:text-emerald-300 font-mono"
+                            >
+                                {importMatchedCount}
+                            </span>
+                        </div>
+                        <div
+                            class="p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-100 dark:border-amber-900/40"
+                        >
+                            <span
+                                class="text-[10px] font-bold text-amber-600 dark:text-amber-400 block uppercase"
+                                >Missing</span
+                            >
+                            <span
+                                class="text-xs font-extrabold text-amber-700 dark:text-amber-300 font-mono"
+                            >
+                                {importMissingCount}
+                            </span>
+                        </div>
+                    </div>
+
+                    <p
+                        class="text-[11px] text-slate-400 dark:text-slate-500 italic"
+                    >
+                        Mohon tunggu sebentar, jangan menutup atau memuat ulang
+                        halaman...
                     </p>
                 </div>
-
-                <!-- Progress Bar & Percentage -->
-                <div class="space-y-2">
-                    <div class="flex justify-between items-center text-xs font-bold">
-                        <span class="text-slate-600 dark:text-slate-300">
-                            Chunk {importCurrentChunk} dari {importTotalChunks || 1}
-                        </span>
-                        <span class="text-cyan-600 dark:text-cyan-400 text-sm">
-                            {importProgress}%
-                        </span>
-                    </div>
-                    <div class="w-full bg-slate-100 dark:bg-slate-800 h-3 rounded-full overflow-hidden p-0.5 border border-slate-200/50 dark:border-slate-700/50">
-                        <div
-                            class="bg-gradient-to-r from-cyan-500 via-rose-500 to-pink-500 h-full transition-all duration-300 rounded-full"
-                            style="width: {importProgress}%"
-                        ></div>
-                    </div>
-                </div>
-
-                <!-- Live Metrics Grid -->
-                <div class="grid grid-cols-3 gap-2 pt-2 border-t border-slate-100 dark:border-slate-800 text-center">
-                    <div class="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-slate-100 dark:border-slate-800/60">
-                        <span class="text-[10px] font-bold text-slate-400 block uppercase">Total Data</span>
-                        <span class="text-xs font-extrabold text-slate-700 dark:text-slate-200 font-mono">
-                            {importTotalItems}
-                        </span>
-                    </div>
-                    <div class="p-2.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-100 dark:border-emerald-900/40">
-                        <span class="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 block uppercase">Matched</span>
-                        <span class="text-xs font-extrabold text-emerald-700 dark:text-emerald-300 font-mono">
-                            {importMatchedCount}
-                        </span>
-                    </div>
-                    <div class="p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-100 dark:border-amber-900/40">
-                        <span class="text-[10px] font-bold text-amber-600 dark:text-amber-400 block uppercase">Missing</span>
-                        <span class="text-xs font-extrabold text-amber-700 dark:text-amber-300 font-mono">
-                            {importMissingCount}
-                        </span>
-                    </div>
-                </div>
-
-                <p class="text-[11px] text-slate-400 dark:text-slate-500 italic">
-                    Mohon tunggu sebentar, jangan menutup atau memuat ulang halaman...
-                </p>
             </div>
-        </div>
-    {/if}
-</AdminLayout>
+        {/if}
+    </div></AdminLayout
+>
