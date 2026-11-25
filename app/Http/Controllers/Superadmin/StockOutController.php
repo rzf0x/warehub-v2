@@ -25,6 +25,9 @@ use Inertia\Inertia;
 
 class StockOutController extends Controller
 {
+    /** @var array<string, bool> */
+    private static array $hasTotalAmountColCache = [];
+
     public function index(Request $request)
     {
         $search = $request->input('search');
@@ -1472,12 +1475,14 @@ class StockOutController extends Controller
 
     public function settlement(Request $request)
     {
-        $periodId = $request->input('period_id');
+        $requestedPeriodId = $request->input('period_id');
         $sellerId = $request->input('seller_id');
         $konveksiId = $request->input('konveksi_id');
 
-        $periods = Period::select('id', 'name', 'start_date', 'end_date')
+        // Langsung ambil semua kolom ringan dari periods tanpa query information_schema (menghindari duplicate query Debugbar)
+        $periods = Period::query()
             ->orderBy('start_date', 'desc')
+            ->orderBy('id', 'desc')
             ->get();
         $sellers = Seller::select('id', 'seller_name')
             ->orderBy('seller_name', 'asc')
@@ -1486,33 +1491,182 @@ class StockOutController extends Controller
             ->orderBy('name', 'asc')
             ->get();
 
-        $query = StockOut::with([
-            'period',
-            'store.seller',
-            'items.konveksi',
-            'items.productVariant.product.seller',
-            'items.productVariant.product.konveksi',
-        ]);
-
-        if ($periodId) {
-            $query->where('period_id', $periodId);
+        // Selalu scope ke 1 periode saja (default ke periode aktif / publik terbaru) agar ringan & tidak render semua periode
+        $selectedPeriod = null;
+        if ($requestedPeriodId) {
+            $selectedPeriod = $periods->firstWhere('id', (int) $requestedPeriodId);
         }
+        if (!$selectedPeriod) {
+            $selectedPeriod = $periods->first(fn ($p) => !empty($p->getAttributes()['is_active']))
+                ?? $periods->first(fn ($p) => !empty($p->getAttributes()['is_public']))
+                ?? $periods->first();
+        }
+        $periodId = $selectedPeriod?->id;
 
-        if ($sellerId) {
-            $query->where(function ($sq) use ($sellerId) {
-                $sq->whereHas('store', fn($st) => $st->where('seller_id', $sellerId))
-                   ->orWhereHas('items.productVariant.product', fn($pq) => $pq->where('seller_id', $sellerId));
+        $periodsMap = $periods->keyBy('id');
+        $sellersMap = $sellers->pluck('seller_name', 'id')->all();
+        $konveksisMap = $konveksis->pluck('name', 'id')->all();
+        $storesMap = DB::table('stores')
+            ->select('id', 'store_name', 'marketplace', 'seller_id')
+            ->get()
+            ->keyBy('id');
+
+        $applyStockOutFilters = function ($query) use ($periodId, $sellerId, $konveksiId) {
+            $query->when(
+                $periodId !== null,
+                fn ($q) => $q->where('stock_outs.period_id', $periodId),
+                fn ($q) => $q->whereRaw('1 = 0')
+            )
+            ->when($sellerId, function ($q) use ($sellerId) {
+                $q->where(function ($sq) use ($sellerId) {
+                    $sq->whereExists(function ($st) use ($sellerId) {
+                        $st->select(DB::raw(1))
+                            ->from('stores')
+                            ->whereColumn('stores.id', 'stock_outs.store_id')
+                            ->where('stores.seller_id', $sellerId);
+                    })->orWhereExists(function ($it) use ($sellerId) {
+                        $it->select(DB::raw(1))
+                            ->from('stock_out_items as soi')
+                            ->join('product_variants as pv', 'pv.id', '=', 'soi.product_variant_id')
+                            ->join('products as p', 'p.id', '=', 'pv.product_id')
+                            ->whereColumn('soi.stock_out_id', 'stock_outs.id')
+                            ->where('p.seller_id', $sellerId);
+                    });
+                });
+            })
+            ->when($konveksiId, function ($q) use ($konveksiId) {
+                $q->whereExists(function ($it) use ($konveksiId) {
+                    $it->select(DB::raw(1))
+                        ->from('stock_out_items as soi')
+                        ->leftJoin('product_variants as pv', 'pv.id', '=', 'soi.product_variant_id')
+                        ->leftJoin('products as p', 'p.id', '=', 'pv.product_id')
+                        ->whereColumn('soi.stock_out_id', 'stock_outs.id')
+                        ->where(function ($kq) use ($konveksiId) {
+                            $kq->where('soi.konveksi_id', $konveksiId)
+                                ->orWhere('p.konveksi_id', $konveksiId);
+                        });
+                });
             });
+        };
+
+        $filteredIdsQuery = DB::table('stock_outs')->select('stock_outs.id');
+        $applyStockOutFilters($filteredIdsQuery);
+
+        // Agregasi qty & HPP per (stock_out_id, konveksi) langsung di SQL tanpa hidrasi ribuan model Eloquent
+        $effectiveKonveksiSql = 'COALESCE(ki.id, kp.id, 0)';
+        $itemAggRows = DB::table('stock_out_items as soi')
+            ->leftJoin('product_variants as pv', 'pv.id', '=', 'soi.product_variant_id')
+            ->leftJoin('products as p', 'p.id', '=', 'pv.product_id')
+            ->leftJoin('konveksis as ki', 'ki.id', '=', 'soi.konveksi_id')
+            ->leftJoin('konveksis as kp', 'kp.id', '=', 'p.konveksi_id')
+            ->whereIn('soi.stock_out_id', $filteredIdsQuery)
+            ->when($konveksiId, function ($q) use ($konveksiId) {
+                $q->where(function ($kq) use ($konveksiId) {
+                    $kq->where('soi.konveksi_id', $konveksiId)
+                        ->orWhere('p.konveksi_id', $konveksiId);
+                });
+            })
+            ->selectRaw("
+                soi.stock_out_id,
+                {$effectiveKonveksiSql} as eff_konveksi_id,
+                MIN(soi.id) as first_item_id,
+                COALESCE(SUM(soi.qty), 0) as total_pcs,
+                COALESCE(SUM(soi.qty * soi.price), 0) as raw_nominal,
+                MIN(CASE WHEN p.seller_id IS NOT NULL THEN soi.id END) as first_seller_item_id
+            ")
+            ->groupByRaw("soi.stock_out_id, {$effectiveKonveksiSql}")
+            ->orderBy('soi.stock_out_id')
+            ->orderBy('first_item_id')
+            ->get();
+
+        $itemsByStockOut = [];
+        $earliestSellerItemBySo = [];
+        foreach ($itemAggRows as $aggRow) {
+            $soId = (int) $aggRow->stock_out_id;
+            $itemsByStockOut[$soId][] = [
+                'konveksi_id' => (int) $aggRow->eff_konveksi_id,
+                'pcs' => (int) $aggRow->total_pcs,
+                'nominal' => (float) $aggRow->raw_nominal,
+            ];
+
+            if ($aggRow->first_seller_item_id !== null) {
+                $candItemId = (int) $aggRow->first_seller_item_id;
+                if (!isset($earliestSellerItemBySo[$soId]) || $candItemId < $earliestSellerItemBySo[$soId]) {
+                    $earliestSellerItemBySo[$soId] = $candItemId;
+                }
+            }
+        }
+        unset($itemAggRows);
+
+        $connName = DB::connection()->getName() ?? 'default';
+        $driver = DB::connection()->getDriverName();
+        $jsonArrayLenSql = match ($driver) {
+            'sqlite' => 'CASE WHEN stock_outs.resi_summary IS NOT NULL AND LENGTH(stock_outs.resi_summary) > 4096 AND json_valid(stock_outs.resi_summary) THEN json_array_length(stock_outs.resi_summary) ELSE NULL END',
+            'mysql', 'mariadb' => 'CASE WHEN stock_outs.resi_summary IS NOT NULL AND LENGTH(stock_outs.resi_summary) > 4096 AND JSON_VALID(stock_outs.resi_summary) THEN JSON_LENGTH(stock_outs.resi_summary) ELSE NULL END',
+            default => 'NULL',
+        };
+        if (!array_key_exists($connName, self::$hasTotalAmountColCache)) {
+            self::$hasTotalAmountColCache[$connName] = \Illuminate\Support\Facades\Schema::hasColumn('stock_outs', 'total_amount');
+        }
+        $hasTotalAmountCol = self::$hasTotalAmountColCache[$connName];
+
+        // Ambil header stock_outs langsung tanpa subquery berulang & potongan pendek resi_summary (maks 4KB)
+        $stockOutsQuery = DB::table('stock_outs');
+        $applyStockOutFilters($stockOutsQuery);
+        $stockOuts = $stockOutsQuery
+            ->select([
+                'stock_outs.id',
+                'stock_outs.store_id',
+                'stock_outs.period_id',
+                'stock_outs.date',
+                'stock_outs.note',
+                $hasTotalAmountCol ? 'stock_outs.total_amount' : DB::raw('0 as total_amount'),
+                DB::raw('LENGTH(stock_outs.resi_summary) as resi_raw_len'),
+                DB::raw('SUBSTR(stock_outs.resi_summary, 1, 4096) as resi_head'),
+                DB::raw('SUBSTR(RTRIM(stock_outs.resi_summary), -1, 1) as resi_last_char'),
+                DB::raw("CASE
+                    WHEN stock_outs.resi_summary IS NULL OR LENGTH(stock_outs.resi_summary) <= 4096 THEN NULL
+                    ELSE (
+                        (LENGTH(stock_outs.resi_summary) - LENGTH(REPLACE(stock_outs.resi_summary, '\"no_resi\"', ''))) / 9
+                        - (LENGTH(stock_outs.resi_summary) - LENGTH(REPLACE(stock_outs.resi_summary, '\"no_resi\":\"\"', ''))) / 12
+                        - (LENGTH(stock_outs.resi_summary) - LENGTH(REPLACE(stock_outs.resi_summary, '\"no_resi\": \"\"', ''))) / 13
+                        - (LENGTH(stock_outs.resi_summary) - LENGTH(REPLACE(stock_outs.resi_summary, '\"no_resi\":null', ''))) / 14
+                        - (LENGTH(stock_outs.resi_summary) - LENGTH(REPLACE(stock_outs.resi_summary, '\"no_resi\": null', ''))) / 15
+                    )
+                END as resi_obj_count"),
+                DB::raw("{$jsonArrayLenSql} as resi_json_len"),
+            ])
+            ->orderBy('stock_outs.date', 'desc')
+            ->orderBy('stock_outs.id', 'desc')
+            ->get();
+
+        // Fallback seller dari item hanya untuk stock_outs yang tidak punya store->seller_id
+        $fallbackItemIdsToResolve = [];
+        foreach ($stockOuts as $so) {
+            $storeObj = $so->store_id ? ($storesMap[$so->store_id] ?? null) : null;
+            $hasStoreSeller = $storeObj && $storeObj->seller_id && isset($sellersMap[$storeObj->seller_id]);
+            if (!$hasStoreSeller && isset($earliestSellerItemBySo[$so->id])) {
+                $fallbackItemIdsToResolve[$so->id] = $earliestSellerItemBySo[$so->id];
+            }
         }
 
-        if ($konveksiId) {
-            $query->whereHas('items', function ($iq) use ($konveksiId) {
-                $iq->where('konveksi_id', $konveksiId)
-                   ->orWhereHas('productVariant.product', fn($pq) => $pq->where('konveksi_id', $konveksiId));
-            });
+        $fallbackSellerBySoId = [];
+        if (!empty($fallbackItemIdsToResolve)) {
+            $itemSellerMap = DB::table('stock_out_items as soi')
+                ->join('product_variants as pv', 'pv.id', '=', 'soi.product_variant_id')
+                ->join('products as p', 'p.id', '=', 'pv.product_id')
+                ->whereIn('soi.id', array_values($fallbackItemIdsToResolve))
+                ->pluck('p.seller_id', 'soi.id')
+                ->all();
+
+            foreach ($fallbackItemIdsToResolve as $soId => $itemId) {
+                if (isset($itemSellerMap[$itemId])) {
+                    $fallbackSellerBySoId[$soId] = (int) $itemSellerMap[$itemId];
+                }
+            }
         }
 
-        $stockOuts = $query->orderBy('date', 'desc')->orderBy('id', 'desc')->get();
+        $pdfUrlTemplate = route('superadmin.warehouse.stock-out.pdf', ['stockOut' => '__SO_ID__']);
 
         // Hierarchical grouping: Period -> Seller -> Store -> Fakturs (with Konveksi Breakdown)
         $periodsGrouped = [];
@@ -1521,44 +1675,55 @@ class StockOutController extends Controller
         $grandTotalFakturs = 0;
 
         foreach ($stockOuts as $so) {
-            // Filter items by konveksi if filter is active
-            $matchingItems = $so->items;
-            if ($konveksiId) {
-                $matchingItems = $matchingItems->filter(function ($item) use ($konveksiId) {
-                    return $item->konveksi_id == $konveksiId ||
-                        ($item->productVariant && $item->productVariant->product && $item->productVariant->product->konveksi_id == $konveksiId);
-                });
+            $soId = (int) $so->id;
+            $itemGroups = $itemsByStockOut[$soId] ?? [];
+
+            $soPcs = 0;
+            $rawItemsNominal = 0.0;
+            foreach ($itemGroups as $ig) {
+                $soPcs += $ig['pcs'];
+                $rawItemsNominal += $ig['nominal'];
             }
 
-            $soPcs = (int) $matchingItems->sum('qty');
             if ($konveksiId) {
-                $soNominal = (float) $matchingItems->sum(fn($i) => (float)($i->qty * $i->price));
+                $soNominal = $rawItemsNominal;
             } else {
-                $soNominal = (float) ($so->total_amount > 0
-                    ? $so->total_amount
-                    : $matchingItems->sum(fn($i) => (float)($i->qty * $i->price)));
+                $headerAmount = (float) ($so->total_amount ?? 0);
+                $soNominal = $headerAmount > 0 ? $headerAmount : $rawItemsNominal;
             }
 
             if ($soPcs <= 0 && $konveksiId) {
                 continue;
             }
 
+            // Seller group resolution (before initializing period bucket to avoid empty period cards)
+            $sId = null;
+            $sName = 'Umum / Non-Seller';
+            $storeObj = $so->store_id ? ($storesMap[$so->store_id] ?? null) : null;
+            if ($storeObj && $storeObj->seller_id && isset($sellersMap[$storeObj->seller_id])) {
+                $sId = (int) $storeObj->seller_id;
+                $sName = $sellersMap[$sId];
+            } elseif (isset($fallbackSellerBySoId[$soId]) && isset($sellersMap[$fallbackSellerBySoId[$soId]])) {
+                $sId = $fallbackSellerBySoId[$soId];
+                $sName = $sellersMap[$sId];
+            }
+
+            if ($sellerId && $sId != $sellerId) {
+                continue;
+            }
+
             // Calculate per-konveksi breakdown for this stock out based on HPP (Modal)
             $soKonveksi = [];
-            foreach ($matchingItems as $item) {
-                $kId = $item->konveksi_id ?: ($item->productVariant?->product?->konveksi_id ?: 0);
-                $kName = $item->konveksi?->name ?: ($item->productVariant?->product?->konveksi?->name ?: 'Tanpa Konveksi');
+            foreach ($itemGroups as $ig) {
+                $kId = $ig['konveksi_id'];
+                $kName = ($kId > 0 && isset($konveksisMap[$kId])) ? $konveksisMap[$kId] : 'Tanpa Konveksi';
 
-                if (!isset($soKonveksi[$kId])) {
-                    $soKonveksi[$kId] = [
-                        'konveksi_id' => $kId,
-                        'name' => $kName,
-                        'pcs' => 0,
-                        'nominal' => 0,
-                    ];
-                }
-                $soKonveksi[$kId]['pcs'] += (int) $item->qty;
-                $soKonveksi[$kId]['nominal'] += (float) ($item->qty * $item->price);
+                $soKonveksi[$kId] = [
+                    'konveksi_id' => $kId,
+                    'name' => $kName,
+                    'pcs' => $ig['pcs'],
+                    'nominal' => $ig['nominal'],
+                ];
             }
 
             // Reconcile each konveksi's nominal proportionally so their sum matches $soNominal exactly
@@ -1577,7 +1742,7 @@ class StockOutController extends Controller
                         if ($kId === $lastKey) {
                             $kVal['nominal'] = round($soNominal - $accumulatedNominal, $precision);
                         } else {
-                            $scaledVal = round((float)$kVal['nominal'] * $ratioScale, $precision);
+                            $scaledVal = round((float) $kVal['nominal'] * $ratioScale, $precision);
                             $kVal['nominal'] = $scaledVal;
                             $accumulatedNominal += $scaledVal;
                         }
@@ -1588,7 +1753,7 @@ class StockOutController extends Controller
                         if ($kId === $lastKey) {
                             $kVal['nominal'] = round($soNominal - $accumulatedNominal, $precision);
                         } else {
-                            $pcsRatio = (float)$kVal['pcs'] / (float)$soPcs;
+                            $pcsRatio = (float) $kVal['pcs'] / (float) $soPcs;
                             $scaledVal = round($soNominal * $pcsRatio, $precision);
                             $kVal['nominal'] = $scaledVal;
                             $accumulatedNominal += $scaledVal;
@@ -1605,9 +1770,10 @@ class StockOutController extends Controller
 
             // Period group
             $pId = $so->period_id ?? 0;
-            $pName = $so->period?->name ?? 'Tanpa Periode / Umum';
-            $pStartDate = $so->period?->start_date ? $so->period->start_date->format('d M Y') : null;
-            $pEndDate = $so->period?->end_date ? $so->period->end_date->format('d M Y') : null;
+            $periodObj = $so->period_id ? ($periodsMap[$so->period_id] ?? null) : null;
+            $pName = $periodObj?->name ?? 'Tanpa Periode / Umum';
+            $pStartDate = $periodObj?->start_date ? $periodObj->start_date->format('d M Y') : null;
+            $pEndDate = $periodObj?->end_date ? $periodObj->end_date->format('d M Y') : null;
 
             if (!isset($periodsGrouped[$pId])) {
                 $periodsGrouped[$pId] = [
@@ -1621,26 +1787,6 @@ class StockOutController extends Controller
                     'konveksis' => [],
                     'sellers' => [],
                 ];
-            }
-
-            // Seller group
-            $sId = null;
-            $sName = 'Umum / Non-Seller';
-            if ($so->store && $so->store->seller) {
-                $sId = $so->store->seller->id;
-                $sName = $so->store->seller->seller_name;
-            } else {
-                foreach ($matchingItems as $item) {
-                    if ($item->productVariant?->product?->seller) {
-                        $sId = $item->productVariant->product->seller->id;
-                        $sName = $item->productVariant->product->seller->seller_name;
-                        break;
-                    }
-                }
-            }
-
-            if ($sellerId && $sId != $sellerId) {
-                continue;
             }
 
             $sellerKey = $sId ?? 0;
@@ -1657,8 +1803,8 @@ class StockOutController extends Controller
 
             // Store group
             $storeId = $so->store_id ?? 0;
-            $storeName = $so->store?->store_name ?? 'Penjualan Direct / Tanpa Toko';
-            $marketplace = $so->store?->marketplace ?? 'OFFLINE';
+            $storeName = $storeObj?->store_name ?? 'Penjualan Direct / Tanpa Toko';
+            $marketplace = $storeObj?->marketplace ?? 'OFFLINE';
 
             if (!isset($periodsGrouped[$pId]['sellers'][$sellerKey]['stores'][$storeId])) {
                 $periodsGrouped[$pId]['sellers'][$sellerKey]['stores'][$storeId] = [
@@ -1673,20 +1819,34 @@ class StockOutController extends Controller
                 ];
             }
 
-            // Format Resi cleanly (handles raw marketplace JSON string)
-            $resiInfo = $this->formatResiSummary($so->resi_summary);
+            // Format Resi tanpa full json_decode pada LONGTEXT besar
+            $rawLen = (int) ($so->resi_raw_len ?? 0);
+            $precomputedTotal = null;
+            if ($rawLen > 4096) {
+                $objCount = (int) round((float) ($so->resi_obj_count ?? 0));
+                $jsonLen = $so->resi_json_len !== null ? (int) $so->resi_json_len : 0;
+                $precomputedTotal = $objCount > 0 ? $objCount : $jsonLen;
+            }
+            $resiInfo = $this->formatResiSummaryHead(
+                $so->resi_head,
+                $rawLen,
+                $so->resi_last_char,
+                $precomputedTotal,
+                false
+            );
 
-            $noFaktur = 'OUT-' . str_pad((string)$so->id, 5, '0', STR_PAD_LEFT);
+            $noFaktur = 'OUT-' . str_pad((string) $soId, 5, '0', STR_PAD_LEFT);
+            $formattedDate = $so->date ? date('d M Y', strtotime((string) $so->date)) : '-';
             $fakturItem = [
-                'id' => $so->id,
+                'id' => $soId,
                 'no_faktur' => $noFaktur,
-                'date' => $so->date ? $so->date->format('d M Y') : '-',
+                'date' => $formattedDate,
                 'resi_info' => $resiInfo,
                 'pcs' => $soPcs,
                 'nominal' => $soNominal,
                 'note' => $so->note,
                 'konveksis' => array_values($soKonveksi),
-                'pdf_url' => route('superadmin.warehouse.stock-out.pdf', $so->id),
+                'pdf_url' => str_replace('__SO_ID__', (string) $soId, $pdfUrlTemplate),
             ];
 
             // Accumulate Konveksi breakdown to Store, Seller, and Period
@@ -1745,6 +1905,7 @@ class StockOutController extends Controller
             $grandTotalNominal += $soNominal;
             $grandTotalFakturs += 1;
         }
+        unset($stockOuts, $itemsByStockOut);
 
         // Convert associative keys to indexed lists
         $resultPeriods = [];
@@ -1779,16 +1940,16 @@ class StockOutController extends Controller
             'settlementPeriods' => $resultPeriods,
             'summary' => $summary,
             'filters' => [
-                'period_id' => $periodId ? (int)$periodId : null,
-                'seller_id' => $sellerId ? (int)$sellerId : null,
-                'konveksi_id' => $konveksiId ? (int)$konveksiId : null,
+                'period_id' => $periodId ? (int) $periodId : null,
+                'seller_id' => $sellerId ? (int) $sellerId : null,
+                'konveksi_id' => $konveksiId ? (int) $konveksiId : null,
             ],
         ]);
     }
 
     private function formatResiSummary(?string $raw): array
     {
-        if (!$raw || trim($raw) === '') {
+        if ($raw === null || $raw === '') {
             return [
                 'total_resi' => 0,
                 'label' => '0 Resi',
@@ -1797,43 +1958,157 @@ class StockOutController extends Controller
             ];
         }
 
-        $trimmed = trim($raw);
-        if (str_starts_with($trimmed, '[') && str_ends_with($trimmed, ']')) {
-            $decoded = json_decode($trimmed, true);
-            if (is_array($decoded)) {
-                $resis = [];
-                foreach ($decoded as $entry) {
-                    if (is_array($entry) && !empty($entry['no_resi'])) {
-                        $resis[] = trim((string)$entry['no_resi']);
-                    } elseif (is_string($entry)) {
-                        $resis[] = trim($entry);
+        $rawLen = strlen($raw);
+        if ($rawLen <= 4096) {
+            return $this->formatResiSummaryHead($raw, $rawLen, null, null, true);
+        }
+
+        // Memory-safe path untuk string JSON LONGTEXT besar (tanpa json_decode seluruh payload)
+        $end = $rawLen - 1;
+        while ($end >= 0 && in_array($raw[$end], [' ', "\t", "\n", "\r", "\0", "\x0B"], true)) {
+            $end--;
+        }
+        $lastChar = $end >= 0 ? $raw[$end] : '';
+
+        $totalKeys = substr_count($raw, '"no_resi"');
+        if ($totalKeys > 0) {
+            $emptyKeys = substr_count($raw, '"no_resi":""')
+                + substr_count($raw, '"no_resi": ""')
+                + substr_count($raw, '"no_resi":null')
+                + substr_count($raw, '"no_resi": null');
+            $precomputedTotal = max(0, $totalKeys - $emptyKeys);
+        } else {
+            $precomputedTotal = (int) preg_match_all('/"(?:[^"\\\\]|\\\\.)+"/', $raw);
+        }
+
+        return $this->formatResiSummaryHead(
+            substr($raw, 0, 4096),
+            $rawLen,
+            $lastChar,
+            $precomputedTotal,
+            true
+        );
+    }
+
+    private function formatResiSummaryHead(
+        ?string $head,
+        int $rawLen,
+        ?string $lastChar = null,
+        ?int $precomputedTotal = null,
+        bool $includeSamples = true
+    ): array {
+        if ($head === null || trim($head) === '') {
+            return $this->buildResiSummaryResult(0, '0 Resi', '-', [], $includeSamples);
+        }
+
+        $ltrimmed = ltrim($head);
+        $startsWithBracket = str_starts_with($ltrimmed, '[');
+        $endsWithBracket = $lastChar !== null
+            ? ($lastChar === ']')
+            : str_ends_with(rtrim($ltrimmed), ']');
+
+        if ($startsWithBracket && $endsWithBracket) {
+            // Jika ukuran penuh <= 4KB, aman menggunakan json_decode langsung
+            if ($rawLen <= 4096 && $precomputedTotal === null) {
+                $decoded = json_decode(trim($head), true);
+                if (is_array($decoded)) {
+                    $resis = [];
+                    foreach ($decoded as $entry) {
+                        if (is_array($entry) && !empty($entry['no_resi'])) {
+                            $resis[] = trim((string) $entry['no_resi']);
+                        } elseif (is_string($entry) && trim($entry) !== '') {
+                            $resis[] = trim($entry);
+                        }
+                    }
+
+                    $total = count($resis);
+                    $firstFew = array_slice($resis, 0, 2);
+                    $remaining = max(0, $total - count($firstFew));
+                    $preview = implode(', ', $firstFew);
+                    if ($remaining > 0) {
+                        $preview .= $preview !== '' ? " (+{$remaining} resi)" : "({$remaining} resi)";
+                    }
+
+                    return $this->buildResiSummaryResult(
+                        $total,
+                        "{$total} Resi",
+                        $preview ?: '-',
+                        array_slice($resis, 0, 10),
+                        $includeSamples
+                    );
+                }
+            } else {
+                // Ekstrak sample resi dari potongan 4KB pertama tanpa decode seluruh JSON
+                $sampleResis = [];
+                $maxSamples = $includeSamples ? 10 : 2;
+
+                if (str_contains($ltrimmed, '"no_resi"')) {
+                    if (preg_match_all('/"no_resi"\s*:\s*"((?:[^"\\\\]|\\\\.)*)"/', $ltrimmed, $matches)) {
+                        foreach ($matches[1] as $rawVal) {
+                            $decodedVal = json_decode('"' . $rawVal . '"');
+                            $val = trim(is_string($decodedVal) ? $decodedVal : $rawVal);
+                            if (!empty($val)) {
+                                $sampleResis[] = $val;
+                                if (count($sampleResis) >= $maxSamples) {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                } elseif (preg_match_all('/"((?:[^"\\\\]|\\\\.)*)"/', $ltrimmed, $matches)) {
+                    foreach ($matches[1] as $rawVal) {
+                        $decodedVal = json_decode('"' . $rawVal . '"');
+                        $val = trim(is_string($decodedVal) ? $decodedVal : $rawVal);
+                        if ($val !== '') {
+                            $sampleResis[] = $val;
+                            if (count($sampleResis) >= $maxSamples) {
+                                break;
+                            }
+                        }
                     }
                 }
 
-                $total = count($resis);
-                $firstFew = array_slice($resis, 0, 2);
+                $total = max(count($sampleResis), (int) ($precomputedTotal ?? 0));
+                $firstFew = array_slice($sampleResis, 0, 2);
                 $remaining = max(0, $total - count($firstFew));
                 $preview = implode(', ', $firstFew);
                 if ($remaining > 0) {
-                    $preview .= " (+{$remaining} resi)";
+                    $preview .= $preview !== '' ? " (+{$remaining} resi)" : "({$remaining} resi)";
                 }
 
-                return [
-                    'total_resi' => $total,
-                    'label' => "{$total} Resi",
-                    'preview' => $preview ?: '-',
-                    'sample_resis' => array_slice($resis, 0, 10),
-                ];
+                return $this->buildResiSummaryResult(
+                    $total,
+                    "{$total} Resi",
+                    $preview ?: '-',
+                    $sampleResis,
+                    $includeSamples
+                );
             }
         }
 
-        $clean = \Illuminate\Support\Str::limit($trimmed, 80);
-        return [
-            'total_resi' => 1,
-            'label' => 'Manual',
-            'preview' => $clean,
-            'sample_resis' => [$clean],
+        $clean = \Illuminate\Support\Str::limit(trim($ltrimmed), 80);
+
+        return $this->buildResiSummaryResult(1, 'Manual', $clean, [$clean], $includeSamples);
+    }
+
+    private function buildResiSummaryResult(
+        int $total,
+        string $label,
+        string $preview,
+        array $samples,
+        bool $includeSamples
+    ): array {
+        $result = [
+            'total_resi' => $total,
+            'label' => $label,
+            'preview' => $preview,
         ];
+
+        if ($includeSamples) {
+            $result['sample_resis'] = $samples;
+        }
+
+        return $result;
     }
 
     public function sellerDetail(Seller $seller)

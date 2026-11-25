@@ -33,7 +33,7 @@
         total_resi: number;
         label: string;
         preview: string;
-        sample_resis: string[];
+        sample_resis?: string[];
     }
 
     interface FakturItem {
@@ -86,6 +86,8 @@
         seller_name?: string;
         start_date?: string;
         end_date?: string;
+        is_public?: boolean;
+        is_active?: boolean;
     }
 
     let {
@@ -124,13 +126,36 @@
     let selectedKonveksiId = $state<string>('');
 
     $effect(() => {
-        selectedPeriodId = filters?.period_id ? String(filters.period_id) : '';
+        selectedPeriodId = filters?.period_id
+            ? String(filters.period_id)
+            : (periods[0]?.id ? String(periods[0].id) : '');
         selectedSellerId = filters?.seller_id ? String(filters.seller_id) : '';
         selectedKonveksiId = filters?.konveksi_id ? String(filters.konveksi_id) : '';
     });
 
-    // Track accordion toggle state for stores' faktur list
+    let activePeriodMeta = $derived(
+        periods.find((p) => String(p.id) === selectedPeriodId) ?? periods[0] ?? null
+    );
+
+    // Track accordion toggle state for stores' faktur list & print mode
     let expandedStores = $state<Record<string, boolean>>({});
+    let isPrinting = $state(false);
+
+    $effect(() => {
+        if (typeof window === 'undefined') return;
+        const onBeforePrint = () => {
+            isPrinting = true;
+        };
+        const onAfterPrint = () => {
+            isPrinting = false;
+        };
+        window.addEventListener('beforeprint', onBeforePrint);
+        window.addEventListener('afterprint', onAfterPrint);
+        return () => {
+            window.removeEventListener('beforeprint', onBeforePrint);
+            window.removeEventListener('afterprint', onAfterPrint);
+        };
+    });
 
     function toggleStoreFakturs(key: string) {
         expandedStores[key] = !expandedStores[key];
@@ -160,14 +185,16 @@
     }
 
     function resetFilters() {
-        selectedPeriodId = '';
         selectedSellerId = '';
         selectedKonveksiId = '';
         router.get('/superadmin/warehouse/stock-out/settlement', {}, { preserveState: true, replace: true });
     }
 
     function printReport() {
-        window.print();
+        isPrinting = true;
+        setTimeout(() => {
+            window.print();
+        }, 50);
     }
 
     function getMarketplaceBadgeClass(marketplace: string): string {
@@ -244,7 +271,7 @@
 
     <!-- Top Summary Metrics Cards -->
     <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-6">
-        <!-- 1. Total Periode -->
+        <!-- 1. Periode Terpilih -->
         <div class="rounded-2xl bg-white dark:bg-slate-900 p-4 border border-slate-200 dark:border-slate-800 shadow-xs">
             <div class="flex items-center justify-between text-slate-500 dark:text-slate-400 mb-1">
                 <span class="text-[11px] font-bold uppercase tracking-wider">Periode Aktif</span>
@@ -252,10 +279,12 @@
                     <Calendar class="h-4 w-4" />
                 </div>
             </div>
-            <div class="text-xl sm:text-2xl font-extrabold text-slate-800 dark:text-slate-100">
-                {summary.total_periods} <span class="text-xs font-medium text-slate-400">Periode</span>
+            <div class="text-lg sm:text-xl font-extrabold text-slate-800 dark:text-slate-100 truncate" title={activePeriodMeta?.name ?? '-'}>
+                {activePeriodMeta?.name ?? '-'}
             </div>
-            <div class="text-[11px] text-slate-400 mt-0.5">Siklus pembukuan terdata</div>
+            <div class="text-[11px] text-slate-400 mt-0.5 truncate">
+                {activePeriodMeta?.start_date ? `${activePeriodMeta.start_date} s/d ${activePeriodMeta.end_date ?? '-'}` : 'Siklus pembukuan aktif'}
+            </div>
         </div>
 
         <!-- 2. Total Pcs Terjual -->
@@ -320,10 +349,12 @@
                     onchange={applyFilters}
                     class="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-xs text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-500"
                 >
-                    <option value="">Semua Periode</option>
+                    {#if periods.length === 0}
+                        <option value="">Belum Ada Periode</option>
+                    {/if}
                     {#each periods as p}
-                        <option value={p.id}>
-                            {p.name} {p.start_date ? `(${p.start_date})` : ''}
+                        <option value={String(p.id)}>
+                            {p.name} {p.start_date ? `(${p.start_date})` : ''}{p.is_active || p.is_public ? ' • Aktif' : ''}
                         </option>
                     {/each}
                 </select>
@@ -567,8 +598,9 @@
                                             </div>
                                         </div>
 
-                                        <!-- Expandable Faktur List Details (Always visible on print) -->
-                                        <div class="{isExpanded ? 'block' : 'hidden print:block'} border-t border-slate-100 dark:border-slate-800/80 bg-slate-50/70 dark:bg-slate-950/60 p-4">
+                                        <!-- Expandable Faktur List Details (Lazy-rendered on expand or print) -->
+                                        {#if isExpanded || isPrinting}
+                                            <div class="{isExpanded ? 'block' : 'hidden print:block'} border-t border-slate-100 dark:border-slate-800/80 bg-slate-50/70 dark:bg-slate-950/60 p-4">
                                                 <div class="mb-2.5 flex items-center justify-between text-xs font-semibold text-slate-500 dark:text-slate-400">
                                                     <span class="flex items-center gap-1.5">
                                                         <FileText class="h-3.5 w-3.5 text-indigo-500" />
@@ -679,7 +711,8 @@
                                                     </table>
                                                 </div>
                                             </div>
-                                        </div>
+                                        {/if}
+                                    </div>
                                 {/each}
                             </div>
                         </div>
