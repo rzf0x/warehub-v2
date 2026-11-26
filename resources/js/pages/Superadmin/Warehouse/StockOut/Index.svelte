@@ -1,12 +1,11 @@
 <script lang="ts">
     import AdminLayout from '@/layouts/AdminLayout.svelte';
     import ConfirmDialog from '@/components/ConfirmDialog.svelte';
-    import Pagination from '@/components/Pagination.svelte';
     import { router, Link } from '@inertiajs/svelte';
     import { 
         ArrowUpRight, Search, Plus, Trash2, Printer, BarChart3, Calculator, 
         FileText, Store, Package, DollarSign, Wallet, Sparkles, User, Calendar,
-        Edit2, Shirt
+        Edit2, Shirt, Eye
     } from '@lucide/svelte';
 
     interface Item {
@@ -24,6 +23,7 @@
 
     interface StockOutRecord {
         id: number;
+        detail_key?: string;
         resi_summary?: string;
         date: string;
         note: string | null;
@@ -39,7 +39,7 @@
     }
 
     let {
-        stockOuts,
+        stockOuts = [],
         warehouses = [],
         stores = [],
         periods = [],
@@ -47,16 +47,10 @@
         metrics = { total_qty: 0, total_hpp: 0, total_bruto: 0, penjualan_bersih: 0, estimasi_keuntungan: 0 },
         filters = { search: '', warehouse_id: '', store_id: '', period_id: '', user_id: '' },
     }: {
-        stockOuts: {
-            data: StockOutRecord[];
-            links: any[];
-            current_page: number;
-            last_page: number;
-            total: number;
-        };
+        stockOuts: StockOutRecord[];
         warehouses?: Array<{ id: number; name: string }>;
         stores?: Array<{ id: number; store_name: string }>;
-        periods?: Array<{ id: number; name: string }>;
+        periods?: Array<{ id: number; name: string; is_active?: boolean; is_public?: boolean }>;
         users?: Array<{ id: number; name: string }>;
         metrics?: {
             total_qty: number;
@@ -71,8 +65,15 @@
     let search = $state(filters.search ?? '');
     let warehouseId = $state(filters.warehouse_id ?? '');
     let storeId = $state(filters.store_id ?? '');
-    let periodId = $state(filters.period_id ?? '');
+    let periodId = $state(String(filters.period_id ?? ''));
     let userId = $state(filters.user_id ?? '');
+
+    let exportPeriodParam = $derived(periodId === 'all' ? '' : periodId);
+    let selectedPeriodName = $derived(
+        periodId === 'all' || !periodId
+            ? 'Semua Periode'
+            : (periods.find((p) => String(p.id) === String(periodId))?.name ?? 'Periode Terpilih')
+    );
 
     let isConfirmDeleteOpen = $state(false);
     let selectedRecord = $state<StockOutRecord | null>(null);
@@ -168,7 +169,7 @@
 
         <div class="flex flex-wrap items-center gap-2">
             <Link
-                href={`/superadmin/warehouse/stock-out/baju-celana?period_id=${periodId}&warehouse_id=${warehouseId}&store_id=${storeId}&user_id=${userId}&search=${encodeURIComponent(search)}`}
+                href={`/superadmin/warehouse/stock-out/baju-celana?period_id=${exportPeriodParam}&warehouse_id=${warehouseId}&store_id=${storeId}&user_id=${userId}&search=${encodeURIComponent(search)}`}
                 class="inline-flex items-center gap-2 rounded-xl border border-blue-200 dark:border-blue-900/60 bg-blue-50/80 dark:bg-blue-950/40 px-3 py-2 text-xs font-semibold text-blue-700 dark:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-900/60 transition-colors shadow-xs"
             >
                 <Shirt class="h-4 w-4 text-blue-600 dark:text-blue-400" />
@@ -192,7 +193,7 @@
             </Link>
 
             <a
-                href={`/superadmin/warehouse/stock-out/summary/pdf?period_id=${periodId}&warehouse_id=${warehouseId}&store_id=${storeId}&user_id=${userId}&search=${encodeURIComponent(search)}`}
+                href={`/superadmin/warehouse/stock-out/summary/pdf?period_id=${exportPeriodParam}&warehouse_id=${warehouseId}&store_id=${storeId}&user_id=${userId}&search=${encodeURIComponent(search)}`}
                 target="_blank"
                 class="inline-flex items-center gap-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3.5 py-2 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors shadow-xs"
             >
@@ -279,12 +280,29 @@
             <div class="text-xl font-extrabold text-violet-600 dark:text-violet-400 truncate">
                 {formatRupiah(metrics.estimasi_keuntungan)}
             </div>
-            <div class="text-[11px] text-slate-400">Profit = Bruto - HPP</div>
+            <div class="text-[11px] text-slate-400">Profit = Penjualan Bersih - HPP</div>
         </div>
     </div>
 
     <!-- Filters -->
     <div class="mb-6 rounded-2xl bg-white dark:bg-slate-900 p-4 shadow-xs border border-slate-200 dark:border-slate-800 flex flex-col md:flex-row flex-wrap items-center gap-3">
+        <!-- Period filter (Primary — replaces pagination) -->
+        <div class="w-full sm:w-auto flex-1 min-w-[180px] relative">
+            <Calendar class="absolute left-3 top-2.5 h-3.5 w-3.5 text-rose-500 pointer-events-none" />
+            <select
+                bind:value={periodId}
+                onchange={applyFilter}
+                class="w-full rounded-xl border border-rose-200 dark:border-rose-900/60 bg-rose-50/60 dark:bg-rose-950/30 pl-8 pr-3 py-2 text-xs font-semibold text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-rose-500"
+            >
+                {#each periods as p}
+                    <option value={String(p.id)}>
+                        {p.name}{p.is_active || p.is_public ? ' (Aktif)' : ''}
+                    </option>
+                {/each}
+                <option value="all">Semua Periode</option>
+            </select>
+        </div>
+
         <!-- Warehouse filter -->
         <div class="w-full sm:w-auto flex-1 min-w-[150px]">
             <select
@@ -309,20 +327,6 @@
                 <option value="">Semua Toko Marketplace</option>
                 {#each stores as st}
                     <option value={st.id}>{st.store_name}</option>
-                {/each}
-            </select>
-        </div>
-
-        <!-- Period filter -->
-        <div class="w-full sm:w-auto flex-1 min-w-[150px]">
-            <select
-                bind:value={periodId}
-                onchange={applyFilter}
-                class="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-xs text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-rose-500"
-            >
-                <option value="">Semua Periode</option>
-                {#each periods as p}
-                    <option value={p.id}>{p.name}</option>
                 {/each}
             </select>
         </div>
@@ -373,7 +377,7 @@
                     </tr>
                 </thead>
                 <tbody class="divide-y divide-slate-100 dark:divide-slate-800">
-                    {#each stockOuts.data as item}
+                    {#each stockOuts as item}
                         {@const rowQty = getItemTotalQty(item)}
                         {@const rowHpp = getItemTotalHpp(item)}
                         {@const rowBruto = getItemTotalBruto(item)}
@@ -409,6 +413,13 @@
                             
                             <!-- 10. Aksi -->
                             <td class="px-4 py-3.5 text-right space-x-1 whitespace-nowrap">
+                                <Link
+                                    href={`/superadmin/warehouse/stock-out/${item.detail_key ?? item.id}`}
+                                    class="inline-flex items-center gap-1 rounded-lg p-2 text-cyan-600 hover:bg-cyan-50 dark:hover:bg-cyan-950/50 transition-colors"
+                                    title="Lihat Detail Barang Keluar"
+                                >
+                                    <Eye class="h-4 w-4" />
+                                </Link>
                                 <a
                                     href={`/superadmin/warehouse/stock-out/${item.id}/pdf`}
                                     target="_blank"
@@ -441,9 +452,13 @@
                 </tbody>
             </table>
         </div>
+        <div class="px-4 py-3 bg-slate-50/70 dark:bg-slate-800/40 border-t border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
+            <span>
+                Menampilkan <strong class="text-slate-700 dark:text-slate-200">{stockOuts.length.toLocaleString('id-ID')}</strong> transaksi pada <strong class="text-rose-600 dark:text-rose-400">{selectedPeriodName}</strong>
+            </span>
+            <span class="text-[11px] text-slate-400">Ganti dropdown periode di atas untuk melihat periode lainnya</span>
+        </div>
     </div>
-
-    <Pagination links={stockOuts.links} />
 
     <!-- Delete Confirm -->
     <ConfirmDialog

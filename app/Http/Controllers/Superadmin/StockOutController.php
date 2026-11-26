@@ -37,8 +37,38 @@ class StockOutController extends Controller
         $search = $request->input('search');
         $warehouseId = $request->input('warehouse_id');
         $storeId = $request->input('store_id');
-        $periodId = $request->input('period_id');
         $userId = $request->input('user_id');
+
+        $periodCols = $this->getTableColumns('periods');
+        $periodSelect = ['id', 'name'];
+        if (isset($periodCols['is_active'])) {
+            $periodSelect[] = 'is_active';
+        }
+        if (isset($periodCols['is_public'])) {
+            $periodSelect[] = 'is_public';
+        }
+        $periods = Period::select($periodSelect)->latest('id')->get();
+
+        // Determine default active period when period_id is not explicitly provided
+        $requestedPeriodId = $request->input('period_id');
+        if ($requestedPeriodId === null || $requestedPeriodId === '') {
+            $activePeriod = $periods->first(function ($p) {
+                return (bool) ($p->is_active ?? $p->is_public ?? false);
+            }) ?? $periods->first();
+            $periodId = $activePeriod ? (string) $activePeriod->id : 'all';
+        } else {
+            $periodId = (string) $requestedPeriodId;
+        }
+
+        $effectivePeriodId = ($periodId !== '' && $periodId !== 'all') ? $periodId : null;
+
+        $stockOutCols = $this->getTableColumns('stock_outs');
+        $hasTotalAmount = isset($stockOutCols['total_amount']);
+
+        $selectCols = ['id', 'warehouse_id', 'user_id', 'store_id', 'period_id', 'date', 'note', 'total_selling_price', 'bruto'];
+        if ($hasTotalAmount) {
+            $selectCols[] = 'total_amount';
+        }
 
         $baseQuery = StockOut::query()
             ->when($search, function ($query, $s) {
@@ -50,11 +80,11 @@ class StockOutController extends Controller
             })
             ->when($warehouseId, fn($q) => $q->where('warehouse_id', $warehouseId))
             ->when($storeId, fn($q) => $q->where('store_id', $storeId))
-            ->when($periodId, fn($q) => $q->where('period_id', $periodId))
+            ->when($effectivePeriodId, fn($q) => $q->where('period_id', $effectivePeriodId))
             ->when($userId, fn($q) => $q->where('user_id', $userId));
 
-        $stockOuts = (clone $baseQuery)
-            ->select('id', 'warehouse_id', 'user_id', 'store_id', 'period_id', 'date', 'note', 'total_amount', 'total_selling_price', 'bruto')
+        $stockOuts = $baseQuery
+            ->select($selectCols)
             ->with([
                 'warehouse:id,name',
                 'user:id,name',
@@ -63,26 +93,52 @@ class StockOutController extends Controller
                 'period:id,name',
             ])
             ->withSum('items', 'qty')
-            ->latest()
-            ->paginate(10)
-            ->withQueryString();
+            ->orderByDesc('date')
+            ->orderByDesc('id')
+            ->get();
 
-        $aggregates = (clone $baseQuery)->selectRaw('
-            COALESCE(SUM(total_amount), 0) as total_hpp,
-            COALESCE(SUM(bruto), 0) as total_bruto,
-            COALESCE(SUM(total_selling_price), 0) as penjualan_bersih
-        ')->first();
+        // Fallback HPP map only when stock_outs.total_amount column is missing or zero
+        $missingHppIds = $stockOuts
+            ->filter(fn ($so) => !$hasTotalAmount || (float) ($so->total_amount ?? 0) <= 0)
+            ->pluck('id')
+            ->all();
 
-        $totalHpp = (float)($aggregates->total_hpp ?? 0);
-        $totalBruto = (float)($aggregates->total_bruto ?? 0);
-        $penjualanBersih = (float)($aggregates->penjualan_bersih ?? 0);
+        $computedHppMap = [];
+        if (!empty($missingHppIds)) {
+            $computedHppMap = DB::table('stock_out_items')
+                ->whereIn('stock_out_id', $missingHppIds)
+                ->selectRaw('stock_out_id, COALESCE(SUM(qty * price), 0) as calc_hpp')
+                ->groupBy('stock_out_id')
+                ->pluck('calc_hpp', 'stock_out_id')
+                ->all();
+        }
+
+        $totalQty = 0;
+        $totalHpp = 0.0;
+        $totalBruto = 0.0;
+        $penjualanBersih = 0.0;
+
+        foreach ($stockOuts as $so) {
+            $rowQty = (int) ($so->items_sum_qty ?? 0);
+            $rowHpp = ($hasTotalAmount && (float) ($so->total_amount ?? 0) > 0)
+                ? (float) $so->total_amount
+                : (float) ($computedHppMap[$so->id] ?? 0);
+            $so->total_amount = $rowHpp;
+            $so->detail_key = StockOut::encodeRouteKey((int) $so->id);
+
+            $rowBersih = (float) ($so->total_selling_price ?? 0);
+            $rowBruto = (float) ($so->bruto ?? 0);
+
+            $totalQty += $rowQty;
+            $totalHpp += $rowHpp;
+            $totalBruto += $rowBruto;
+            $penjualanBersih += $rowBersih;
+        }
+
         $estimasiKeuntungan = $penjualanBersih - $totalHpp;
-
-        $totalQty = (int)StockOutItem::whereIn('stock_out_id', (clone $baseQuery)->select('id'))->sum('qty');
 
         $warehouses = Warehouse::select('id', 'name')->get();
         $stores = Store::select('id', 'store_name')->get();
-        $periods = Period::select('id', 'name')->latest()->get();
         $users = DB::table('users')->select('id', 'name')->orderBy('name')->get();
 
         return Inertia::render('Superadmin/Warehouse/StockOut/Index', [
@@ -92,11 +148,11 @@ class StockOutController extends Controller
             'periods' => $periods,
             'users' => $users,
             'metrics' => [
-                'total_qty' => (int)$totalQty,
-                'total_hpp' => (float)$totalHpp,
-                'total_bruto' => (float)$totalBruto,
-                'penjualan_bersih' => (float)$penjualanBersih,
-                'estimasi_keuntungan' => (float)$estimasiKeuntungan,
+                'total_qty' => (int) $totalQty,
+                'total_hpp' => (float) $totalHpp,
+                'total_bruto' => (float) $totalBruto,
+                'penjualan_bersih' => (float) $penjualanBersih,
+                'estimasi_keuntungan' => (float) $estimasiKeuntungan,
             ],
             'filters' => [
                 'search' => $search,
@@ -193,6 +249,203 @@ class StockOutController extends Controller
             'stockOut' => null,
             'isEdit' => false,
         ]);
+    }
+
+    public function show(string $token)
+    {
+        $id = StockOut::decodeRouteKey($token);
+        if ($id === null) {
+            abort(404);
+        }
+
+        $stockOut = StockOut::with([
+            'warehouse:id,name',
+            'user:id,name',
+            'store:id,store_name,marketplace,seller_id',
+            'store.seller:id,seller_name',
+            'period:id,name',
+            'items' => fn ($q) => $q->orderBy('id'),
+            'items.konveksi:id,name',
+            'items.productVariant:id,product_id,sku,size,color,price',
+            'items.productVariant.product:id,product_name,product_type,seller_id',
+            'items.productVariant.product.seller:id,seller_name',
+        ])->findOrFail($id);
+
+        $rawResiSummary = (string) ($stockOut->resi_summary ?? '');
+        $resiInfo = $this->formatResiSummary($rawResiSummary);
+
+        $resis = [];
+        $trimmedResi = trim($rawResiSummary);
+        if (str_starts_with($trimmedResi, '[')) {
+            $decoded = json_decode($trimmedResi, true);
+            if (is_array($decoded)) {
+                foreach ($decoded as $r) {
+                    if (!is_array($r)) {
+                        continue;
+                    }
+                    $resis[] = [
+                        'order_id' => (string) ($r['order_id'] ?? ''),
+                        'no_resi' => (string) ($r['no_resi'] ?? ''),
+                        'payment' => isset($r['payment']) && is_numeric($r['payment']) ? (float) $r['payment'] : 0.0,
+                    ];
+                }
+            }
+        } elseif ($trimmedResi !== '') {
+            $resis[] = [
+                'order_id' => '-',
+                'no_resi' => $trimmedResi,
+                'payment' => (float) ($stockOut->total_selling_price ?? 0),
+            ];
+        }
+
+        $items = $stockOut->items->map(function ($item) {
+            $variant = $item->productVariant;
+            $product = $variant?->product;
+            $qty = (int) ($item->qty ?? 0);
+            $price = (float) ($item->price ?? 0);
+            $sellingPrice = (float) ($item->selling_price ?? 0);
+
+            return [
+                'id' => $item->id,
+                'sku' => $variant->sku ?? '-',
+                'product_name' => $product->product_name ?? '-',
+                'product_type' => $product->product_type ?? 'single',
+                'size' => $variant->size ?? '-',
+                'color' => $variant->color ?? '-',
+                'seller_name' => $product?->seller?->seller_name ?? '-',
+                'konveksi_name' => $item->konveksi?->name ?? '-',
+                'qty' => $qty,
+                'price' => $price,
+                'subtotal_hpp' => round($qty * $price, 2),
+                'selling_price' => $sellingPrice,
+                'subtotal_selling' => round($qty * $sellingPrice, 2),
+            ];
+        })->sort(function (array $a, array $b) {
+            $baseA = $this->extractBaseSkuForSort($a['sku'], $a['size']);
+            $baseB = $this->extractBaseSkuForSort($b['sku'], $b['size']);
+
+            $baseCmp = strnatcasecmp($baseA, $baseB);
+            if ($baseCmp !== 0) {
+                return $baseCmp;
+            }
+
+            $rankA = $this->getApparelSizeRank($a['size'], $a['sku']);
+            $rankB = $this->getApparelSizeRank($b['size'], $b['sku']);
+            if ($rankA !== $rankB) {
+                return $rankA <=> $rankB;
+            }
+
+            return strnatcasecmp($a['sku'], $b['sku']);
+        })->values();
+
+        $totalQty = (int) $items->sum('qty');
+        $calcHpp = (float) $items->sum('subtotal_hpp');
+        $totalHpp = (float) ($stockOut->total_amount ?? 0) > 0 ? (float) $stockOut->total_amount : $calcHpp;
+        $penjualanBersih = (float) ($stockOut->total_selling_price ?? 0);
+        $totalBruto = (float) ($stockOut->bruto ?? 0) > 0 ? (float) $stockOut->bruto : $penjualanBersih;
+        $biayaMarketplace = max(0.0, $totalBruto - $penjualanBersih);
+        $estimasiKeuntungan = $penjualanBersih - $totalHpp;
+
+        return Inertia::render('Superadmin/Warehouse/StockOut/Show', [
+            'stockOut' => [
+                'id' => $stockOut->id,
+                'detail_key' => StockOut::encodeRouteKey((int) $stockOut->id),
+                'date' => $stockOut->date?->format('Y-m-d') ?? (string) $stockOut->date,
+                'note' => $stockOut->note,
+                'warehouse' => $stockOut->warehouse ? ['id' => $stockOut->warehouse->id, 'name' => $stockOut->warehouse->name] : null,
+                'user' => $stockOut->user ? ['id' => $stockOut->user->id, 'name' => $stockOut->user->name] : null,
+                'period' => $stockOut->period ? ['id' => $stockOut->period->id, 'name' => $stockOut->period->name] : null,
+                'store' => $stockOut->store ? [
+                    'id' => $stockOut->store->id,
+                    'store_name' => $stockOut->store->store_name,
+                    'marketplace' => $stockOut->store->marketplace,
+                    'seller_name' => $stockOut->store->seller?->seller_name ?? null,
+                ] : null,
+                'created_at' => $stockOut->created_at?->format('Y-m-d H:i'),
+            ],
+            'items' => $items,
+            'resis' => $resis,
+            'resiInfo' => $resiInfo,
+            'metrics' => [
+                'total_qty' => $totalQty,
+                'total_hpp' => $totalHpp,
+                'total_bruto' => $totalBruto,
+                'penjualan_bersih' => $penjualanBersih,
+                'biaya_marketplace' => $biayaMarketplace,
+                'estimasi_keuntungan' => $estimasiKeuntungan,
+            ],
+        ]);
+    }
+
+    private function getApparelSizeRank(?string $sizeStr, ?string $skuStr = null): float
+    {
+        static $order = [
+            '3XS' => 1, 'XXXS' => 1,
+            '2XS' => 2, 'XXS' => 2,
+            'XS' => 3,
+            'S' => 4,
+            'M' => 5,
+            'ML' => 6, 'M-L' => 6,
+            'L' => 7,
+            'L-XL' => 8,
+            'XL' => 9,
+            '2XL' => 10, 'XXL' => 10,
+            '3XL' => 11, 'XXXL' => 11,
+            '4XL' => 12, 'XXXXL' => 12,
+            '5XL' => 13, 'XXXXXL' => 13,
+            '6XL' => 14, 'XXXXXXL' => 14,
+            '7XL' => 15,
+            'ALL SIZE' => 50, 'ALLSIZE' => 50,
+            'STANDAR' => 51, 'STANDARD' => 51,
+            'JUMBO' => 52,
+            '-' => 99, '' => 100,
+        ];
+
+        $s = strtoupper(trim((string) preg_replace('/\s+/', ' ', (string) $sizeStr)));
+        if (($s === '' || $s === '-') && $skuStr) {
+            if (preg_match('/[\-\s_](7XL|6XL|5XL|4XL|3XL|2XL|XXXXXXL|XXXXXL|XXXXL|XXXL|XXL|XL|L|M|S|XS|\d{1,3})(?:\-1)?$/i', strtoupper($skuStr), $m)) {
+                $s = $m[1];
+            }
+        }
+
+        if (isset($order[$s])) {
+            return (float) $order[$s];
+        }
+
+        if (preg_match('/^\d+(\.\d+)?$/', $s)) {
+            return 20.0 + ((float) $s * 0.1);
+        }
+
+        if (preg_match('/\b(7XL|6XL|5XL|4XL|3XL|2XL|XXXXXXL|XXXXXL|XXXXL|XXXL|XXL|XL|L|M|S|XS)\b/', $s, $m) && isset($order[$m[1]])) {
+            return (float) $order[$m[1]];
+        }
+
+        if (preg_match('/\b(\d{1,3})\b/', $s, $m)) {
+            return 20.0 + ((float) $m[1] * 0.1);
+        }
+
+        return 80.0;
+    }
+
+    private function extractBaseSkuForSort(?string $skuStr, ?string $sizeStr = null): string
+    {
+        $raw = strtoupper(trim((string) $skuStr));
+        if ($raw === '') {
+            return '';
+        }
+
+        $sz = strtoupper(trim((string) $sizeStr));
+        if ($sz !== '' && $sz !== '-') {
+            $escaped = preg_quote($sz, '/');
+            $stripped = preg_replace('/[\-\s_]*' . $escaped . '(?:\-1)?$/i', '', $raw);
+            if ($stripped !== null && trim($stripped) !== '') {
+                return trim($stripped);
+            }
+        }
+
+        $stripped = preg_replace('/[\-\s_]+(7XL|6XL|5XL|4XL|3XL|2XL|XXXXXXL|XXXXXL|XXXXL|XXXL|XXL|XL|L|M|S|XS|ALL\s*SIZE|JUMBO|STANDAR)(?:\-1)?$/i', '', $raw);
+
+        return trim($stripped ?? $raw);
     }
 
     public function edit($id)
@@ -1934,56 +2187,146 @@ class StockOutController extends Controller
     {
         DB::transaction(function () use ($stockOut) {
             $stockOut->load('items');
-            $cancelLogNote = $this->formatStockLogNote($stockOut, "Pembatalan Stock Out Resi");
+            $nowStr = now()->toDateTimeString();
+            $userId = auth()->id() ?? 1;
 
-            foreach ($stockOut->items as $item) {
-                $stock = Stock::where('warehouse_id', $stockOut->warehouse_id)
-                    ->where('product_variant_id', $item->product_variant_id)
-                    ->first();
+            if ($stockOut->items->isNotEmpty()) {
+                $warehouseId = (int) $stockOut->warehouse_id;
+                $cancelLogNote = Str::limit($this->formatStockLogNote($stockOut, 'Pembatalan Stock Out Resi'), 190);
+                $bundleCancelLogNote = Str::limit($this->formatStockLogNote($stockOut, 'Pembatalan Stock Out Bundle'), 190);
 
-                if ($stock) {
-                    $qtyBefore = $stock->qty;
-                    $stock->increment('qty', $item->qty);
-                    $qtyAfter = $stock->fresh()->qty;
+                // 1. Preload all variants & bundle components in 2 queries
+                $variantIds = $stockOut->items->pluck('product_variant_id')->filter()->unique()->values()->all();
+                $variants = ProductVariant::with('product:id,product_type')
+                    ->whereIn('id', $variantIds)
+                    ->select('id', 'product_id')
+                    ->get()
+                    ->keyBy('id');
 
-                    try {
-                        $logData = [
-                            'reference_type' => StockOut::class,
-                            'reference_id' => $stockOut->id,
-                            'qty_before' => $qtyBefore,
-                            'qty_change' => $item->qty,
-                            'qty_after' => $qtyAfter,
+                $bundleVariantIds = $variants
+                    ->filter(fn ($v) => $v->product && $v->product->product_type === 'bundle')
+                    ->keys()
+                    ->all();
+
+                $bundleMap = !empty($bundleVariantIds)
+                    ? BundleItem::whereIn('bundle_variant_id', $bundleVariantIds)->get()->groupBy('bundle_variant_id')
+                    : collect();
+
+                // 2. Build restore entries (supporting both single and bundle components)
+                $restoreEntries = [];
+                $physicalVariantIdsMap = [];
+
+                foreach ($stockOut->items as $item) {
+                    $vId = (int) $item->product_variant_id;
+                    $qty = (int) $item->qty;
+                    $variant = $variants->get($vId);
+
+                    if ($variant && $variant->product && $variant->product->product_type === 'bundle') {
+                        foreach ($bundleMap->get($variant->id, []) as $bItem) {
+                            $compId = (int) $bItem->component_variant_id;
+                            $compQty = (int) ($bItem->qty ?? $bItem->quantity ?? 1) * $qty;
+                            $restoreEntries[] = [
+                                'variant_id' => $compId,
+                                'qty' => $compQty,
+                                'note' => $bundleCancelLogNote,
+                            ];
+                            $physicalVariantIdsMap[$compId] = true;
+                        }
+                    } else {
+                        $restoreEntries[] = [
+                            'variant_id' => $vId,
+                            'qty' => $qty,
                             'note' => $cancelLogNote,
                         ];
+                        $physicalVariantIdsMap[$vId] = true;
+                    }
+                }
 
-                        if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'product_variant_id')) {
-                            $logData['product_variant_id'] = $item->product_variant_id;
-                        }
-                        if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'warehouse_id')) {
-                            $logData['warehouse_id'] = $stockOut->warehouse_id;
-                        }
-                        if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'stock_id')) {
-                            $logData['stock_id'] = $stock->id;
-                        }
-                        if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'user_id')) {
-                            $logData['user_id'] = auth()->id() ?? 1;
-                        }
-                        if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'type')) {
-                            $logData['type'] = 'STOCK_OUT_CANCEL';
-                        }
-                        if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'quantity_before')) {
-                            $logData['quantity_before'] = $qtyBefore;
-                        }
-                        if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'quantity_after')) {
-                            $logData['quantity_after'] = $qtyAfter;
-                        }
-                        if (\Illuminate\Support\Facades\Schema::hasColumn('stock_logs', 'change_amount')) {
-                            $logData['change_amount'] = $item->qty;
+                // 3. Preload stocks once, compute deltas & StockLog rows in memory, then bulk update & insert
+                $physicalVariantIds = array_keys($physicalVariantIdsMap);
+                if (!empty($physicalVariantIds)) {
+                    $existingStocks = Stock::where('warehouse_id', $warehouseId)
+                        ->whereIn('product_variant_id', $physicalVariantIds)
+                        ->lockForUpdate()
+                        ->get()
+                        ->keyBy('product_variant_id');
+
+                    $runningQty = [];
+                    $stockIdMap = [];
+                    foreach ($existingStocks as $pvId => $stk) {
+                        $runningQty[(int) $pvId] = (int) $stk->qty;
+                        $stockIdMap[(int) $pvId] = (int) $stk->id;
+                    }
+
+                    $logColumns = $this->getStockLogColumns();
+                    $restoreDeltas = [];
+                    $stockLogRows = [];
+
+                    foreach ($restoreEntries as $entry) {
+                        $pvId = (int) $entry['variant_id'];
+                        if (!isset($stockIdMap[$pvId])) {
+                            continue;
                         }
 
-                        StockLog::create($logData);
+                        $restoreQty = (int) $entry['qty'];
+                        $qtyBefore = $runningQty[$pvId] ?? 0;
+                        $qtyAfter = $qtyBefore + $restoreQty;
+                        $runningQty[$pvId] = $qtyAfter;
+                        $restoreDeltas[$pvId] = ($restoreDeltas[$pvId] ?? 0) + $restoreQty;
+
+                        $logRow = [
+                            'reference_type' => StockOut::class,
+                            'reference_id' => $stockOut->id,
+                            'note' => $entry['note'],
+                            'created_at' => $nowStr,
+                            'updated_at' => $nowStr,
+                        ];
+
+                        if (isset($logColumns['stock_id'])) {
+                            $logRow['stock_id'] = $stockIdMap[$pvId];
+                        }
+                        if (isset($logColumns['product_variant_id'])) {
+                            $logRow['product_variant_id'] = $pvId;
+                        }
+                        if (isset($logColumns['warehouse_id'])) {
+                            $logRow['warehouse_id'] = $warehouseId;
+                        }
+                        if (isset($logColumns['user_id'])) {
+                            $logRow['user_id'] = $userId;
+                        }
+                        if (isset($logColumns['type'])) {
+                            $logRow['type'] = 'STOCK_OUT_CANCEL';
+                        }
+                        if (isset($logColumns['qty_before'])) {
+                            $logRow['qty_before'] = $qtyBefore;
+                        }
+                        if (isset($logColumns['qty_change'])) {
+                            $logRow['qty_change'] = $restoreQty;
+                        }
+                        if (isset($logColumns['qty_after'])) {
+                            $logRow['qty_after'] = $qtyAfter;
+                        }
+                        if (isset($logColumns['quantity_before'])) {
+                            $logRow['quantity_before'] = $qtyBefore;
+                        }
+                        if (isset($logColumns['quantity_after'])) {
+                            $logRow['quantity_after'] = $qtyAfter;
+                        }
+                        if (isset($logColumns['change_amount'])) {
+                            $logRow['change_amount'] = $restoreQty;
+                        }
+
+                        $stockLogRows[] = $logRow;
+                    }
+
+                    $this->bulkAdjustStockColumn($warehouseId, $restoreDeltas);
+
+                    try {
+                        foreach (array_chunk($stockLogRows, 300) as $chunk) {
+                            StockLog::insert($chunk);
+                        }
                     } catch (\Throwable $e) {
-                        \Log::warning("Gagal mencatat StockLog destroy: " . $e->getMessage());
+                        \Log::warning('Gagal mencatat bulk StockLog destroy: ' . $e->getMessage());
                     }
                 }
             }

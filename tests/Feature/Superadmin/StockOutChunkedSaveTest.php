@@ -309,4 +309,210 @@ class StockOutChunkedSaveTest extends TestCase
         $this->assertSame(95, (int) Stock::where('warehouse_id', $fx['warehouse']->id)->where('product_variant_id', $fx['varB']->id)->value('qty'));
         $this->assertSame(2, StockOutItem::where('stock_out_id', $stockOut->id)->count());
     }
+
+    public function test_destroy_restores_single_and_bundle_component_stocks_in_bulk_and_logs_cancellation(): void
+    {
+        $fx = $this->seedBaseFixtures();
+
+        $this->actingAs($fx['user'])->post(route('superadmin.warehouse.stock-out.store'), [
+            'warehouse_id' => $fx['warehouse']->id,
+            'store_id' => $fx['store']->id,
+            'period_id' => $fx['period']->id,
+            'date' => '2026-11-26',
+            'resi_summary' => 'RESI-BUNDLE-CANCEL-1',
+            'items' => [
+                ['product_variant_id' => $fx['varA']->id, 'qty' => 4, 'price' => 30000, 'selling_price' => 60000],
+                ['product_variant_id' => $fx['bundleVar']->id, 'qty' => 3, 'price' => 65000, 'selling_price' => 120000],
+            ],
+        ])->assertRedirect(route('superadmin.warehouse.stock-out.index'));
+
+        $stockOut = StockOut::firstOrFail();
+        // After store: varA = 100 - 4 - 3*1 = 93, varB = 100 - 3*2 = 94
+        $this->assertSame(93, (int) Stock::where('warehouse_id', $fx['warehouse']->id)->where('product_variant_id', $fx['varA']->id)->value('qty'));
+        $this->assertSame(94, (int) Stock::where('warehouse_id', $fx['warehouse']->id)->where('product_variant_id', $fx['varB']->id)->value('qty'));
+
+        // Destroy / cancel stock out
+        $this->actingAs($fx['user'])
+            ->delete(route('superadmin.warehouse.stock-out.destroy', $stockOut->id))
+            ->assertRedirect();
+
+        $this->assertSame(0, StockOut::count());
+        $this->assertSame(0, StockOutItem::count());
+        // Both single and bundle component stocks must be fully restored to 100
+        $this->assertSame(100, (int) Stock::where('warehouse_id', $fx['warehouse']->id)->where('product_variant_id', $fx['varA']->id)->value('qty'));
+        $this->assertSame(100, (int) Stock::where('warehouse_id', $fx['warehouse']->id)->where('product_variant_id', $fx['varB']->id)->value('qty'));
+        // 3 positive restoration logs (single varA + bundle components varA & varB)
+        $this->assertSame(
+            3,
+            StockLog::where('reference_id', $stockOut->id)
+                ->where('qty_change', '>', 0)
+                ->where('note', 'like', 'Pembatalan Stock Out%')
+                ->count()
+        );
+    }
+
+    public function test_index_defaults_to_active_period_without_pagination(): void
+    {
+        $fx = $this->seedBaseFixtures();
+
+        $oldPeriod = Period::create([
+            'name' => 'Periode Lama',
+            'start_date' => '2026-10-01',
+            'end_date' => '2026-10-31',
+            'is_public' => false,
+        ]);
+
+        // 1 transaction in active period, 1 in old period
+        StockOut::create([
+            'warehouse_id' => $fx['warehouse']->id,
+            'user_id' => $fx['user']->id,
+            'store_id' => $fx['store']->id,
+            'period_id' => $fx['period']->id,
+            'date' => '2026-11-26',
+            'resi_summary' => 'RESI-ACTIVE',
+            'total_selling_price' => 200000,
+            'bruto' => 220000,
+        ]);
+        StockOut::create([
+            'warehouse_id' => $fx['warehouse']->id,
+            'user_id' => $fx['user']->id,
+            'store_id' => $fx['store']->id,
+            'period_id' => $oldPeriod->id,
+            'date' => '2026-10-15',
+            'resi_summary' => 'RESI-OLD',
+            'total_selling_price' => 150000,
+            'bruto' => 150000,
+        ]);
+
+        // Default index without period_id -> scoped to active period, returns flat array (no pagination)
+        $this->actingAs($fx['user'])
+            ->get(route('superadmin.warehouse.stock-out.index'))
+            ->assertOk()
+            ->assertInertia(fn ($page) => $page
+                ->component('Superadmin/Warehouse/StockOut/Index')
+                ->has('stockOuts', 1)
+                ->where('filters.period_id', (string) $fx['period']->id)
+                ->where('metrics.penjualan_bersih', 200000)
+            );
+
+        // Switching to period_id=all returns both
+        $this->actingAs($fx['user'])
+            ->get(route('superadmin.warehouse.stock-out.index', ['period_id' => 'all']))
+            ->assertOk()
+            ->assertInertia(fn ($page) => $page
+                ->has('stockOuts', 2)
+                ->where('filters.period_id', 'all')
+                ->where('metrics.penjualan_bersih', 350000)
+            );
+    }
+
+    public function test_show_renders_readonly_stock_out_detail_page(): void
+    {
+        $fx = $this->seedBaseFixtures();
+
+        // Create unsorted SKU variants across sizes M, L, XL, XXL, 3XL, 4XL, 5XL and two base SKUs (A and B)
+        $prodA = Product::create([
+            'seller_id' => $fx['seller']->id,
+            'konveksi_id' => $fx['konveksi']->id,
+            'product_name' => 'Kaos A',
+            'sku' => 'SKU-A',
+            'product_type' => 'single',
+        ]);
+        $sizesUnsorted = ['5XL', 'M', 'XXL', '3XL', 'XL', '4XL', 'L'];
+        $createdVarsA = [];
+        foreach ($sizesUnsorted as $sz) {
+            $createdVarsA[$sz] = ProductVariant::create([
+                'product_id' => $prodA->id,
+                'sku' => "SKU-A-{$sz}",
+                'size' => $sz,
+                'color' => 'Hitam',
+                'price' => 30000,
+                'selling_price' => 60000,
+            ]);
+        }
+
+        $stockOut = StockOut::create([
+            'warehouse_id' => $fx['warehouse']->id,
+            'user_id' => $fx['user']->id,
+            'store_id' => $fx['store']->id,
+            'period_id' => $fx['period']->id,
+            'date' => '2026-11-26',
+            'note' => 'Detail Read-Only Test',
+            'resi_summary' => json_encode([
+                ['order_id' => 'ORD-1', 'no_resi' => 'JX0001', 'payment' => 240000],
+                ['order_id' => 'ORD-2', 'no_resi' => 'JX0002', 'payment' => 240000],
+            ]),
+            'total_selling_price' => 480000,
+            'bruto' => 500000,
+        ]);
+
+        // Insert items in intentionally scrambled order (KP-L, SKU-A-5XL, SKU-A-M, ..., KP-M)
+        StockOutItem::create([
+            'stock_out_id' => $stockOut->id,
+            'product_variant_id' => $fx['varB']->id, // KP-L
+            'konveksi_id' => $fx['konveksi']->id,
+            'qty' => 1,
+            'price' => 35000,
+            'selling_price' => 70000,
+        ]);
+        foreach ($sizesUnsorted as $sz) {
+            StockOutItem::create([
+                'stock_out_id' => $stockOut->id,
+                'product_variant_id' => $createdVarsA[$sz]->id,
+                'konveksi_id' => $fx['konveksi']->id,
+                'qty' => 1,
+                'price' => 30000,
+                'selling_price' => 60000,
+            ]);
+        }
+        StockOutItem::create([
+            'stock_out_id' => $stockOut->id,
+            'product_variant_id' => $fx['varA']->id, // KP-M
+            'konveksi_id' => $fx['konveksi']->id,
+            'qty' => 1,
+            'price' => 30000,
+            'selling_price' => 60000,
+        ]);
+
+        // 1. Raw sequential numeric ID must be rejected (404)
+        $this->actingAs($fx['user'])
+            ->get('/superadmin/warehouse/stock-out/' . $stockOut->id)
+            ->assertNotFound();
+
+        // 2. Tampered / invalid token must be rejected (404)
+        $this->actingAs($fx['user'])
+            ->get('/superadmin/warehouse/stock-out/invalid-token-12345')
+            ->assertNotFound();
+
+        // 3. Valid opaque route key succeeds and returns items sorted ascending by base SKU + logical size order
+        $detailKey = StockOut::encodeRouteKey((int) $stockOut->id);
+        $this->assertFalse(ctype_digit($detailKey));
+
+        $expectedOrder = [
+            'KP-M',
+            'KP-L',
+            'SKU-A-M',
+            'SKU-A-L',
+            'SKU-A-XL',
+            'SKU-A-XXL',
+            'SKU-A-3XL',
+            'SKU-A-4XL',
+            'SKU-A-5XL',
+        ];
+
+        $this->actingAs($fx['user'])
+            ->get(route('superadmin.warehouse.stock-out.show', $detailKey))
+            ->assertOk()
+            ->assertInertia(fn ($page) => $page
+                ->component('Superadmin/Warehouse/StockOut/Show')
+                ->where('stockOut.id', $stockOut->id)
+                ->where('stockOut.detail_key', $detailKey)
+                ->has('items', 9)
+                ->has('resis', 2)
+                ->where('metrics.total_qty', 9)
+                ->where('metrics.penjualan_bersih', 480000)
+                ->where('metrics.biaya_marketplace', 20000)
+                ->where('items', fn ($items) => collect($items)->pluck('sku')->all() === $expectedOrder)
+            );
+    }
 }

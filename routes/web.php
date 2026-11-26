@@ -106,7 +106,7 @@ Route::middleware(['auth'])->group(function () {
             Route::post('stock-out/save-chunk', [StockOutController::class, 'appendChunkedSave'])->name('stock-out.save-chunk');
             Route::post('stock-out/save-commit', [StockOutController::class, 'commitChunkedSave'])->name('stock-out.save-commit');
             Route::post('stock-out/save-abort', [StockOutController::class, 'abortChunkedSave'])->name('stock-out.save-abort');
-            Route::resource('stock-out', StockOutController::class)->except(['show']);
+            Route::resource('stock-out', StockOutController::class);
 
             // Stock Opname
             Route::get('stock-opname/{stockOpname}/pdf', [StockOpnameController::class, 'streamReport'])->name('stock-opname.pdf');
