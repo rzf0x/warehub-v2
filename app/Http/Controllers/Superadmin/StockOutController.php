@@ -21,6 +21,10 @@ use App\Models\Warehouse;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\File;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 
 class StockOutController extends Controller
@@ -254,92 +258,29 @@ class StockOutController extends Controller
             'bruto' => ['nullable', 'numeric'],
             'total_selling_price' => ['nullable', 'numeric'],
             'items' => ['required', 'array', 'min:1'],
-            'items.*.product_variant_id' => ['required', 'exists:product_variants,id'],
-            'items.*.konveksi_id' => ['nullable', 'exists:konveksis,id'],
+            'items.*.product_variant_id' => ['required', 'integer'],
+            'items.*.konveksi_id' => ['nullable', 'integer'],
             'items.*.qty' => ['required', 'integer', 'min:1'],
             'items.*.price' => ['required', 'numeric', 'min:0'],
             'items.*.selling_price' => ['required', 'numeric'],
         ]);
 
-        DB::transaction(function () use ($validated, $request) {
-            $totalHpp = 0;
-            $totalSelling = 0;
-            foreach ($validated['items'] as $item) {
-                $totalHpp += $item['price'] * $item['qty'];
-                $totalSelling += $item['selling_price'] * $item['qty'];
-            }
+        $this->validateBatchReferences($validated['items']);
 
-            // Check if resi_summary contains payments or total_selling_price provided
-            $parsedResis = json_decode($validated['resi_summary'], true);
-            $hasResiPayments = false;
-            $resiPaymentSum = 0;
-            if (is_array($parsedResis)) {
-                foreach ($parsedResis as $r) {
-                    if (isset($r['payment']) && is_numeric($r['payment'])) {
-                        $hasResiPayments = true;
-                        $resiPaymentSum += (float)$r['payment'];
-                    }
-                }
-            }
-
-            if ($hasResiPayments) {
-                $totalSelling = $resiPaymentSum;
-            } elseif ($request->filled('total_selling_price')) {
-                $totalSelling = (float)$request->input('total_selling_price');
-            }
-
-            $brutoVal = floatval($validated['bruto'] ?? $totalSelling);
-            if ($brutoVal <= 0) $brutoVal = $totalSelling;
-
-            $stockOut = StockOut::create([
-                'warehouse_id' => $validated['warehouse_id'],
-                'user_id' => $request->user()->id,
+        $this->persistStockOutBulk(
+            header: [
+                'warehouse_id' => (int) $validated['warehouse_id'],
                 'store_id' => $validated['store_id'] ?? null,
                 'period_id' => $validated['period_id'] ?? null,
                 'resi_summary' => $validated['resi_summary'],
                 'date' => $validated['date'],
                 'note' => $validated['note'] ?? null,
-                'total_amount' => $totalHpp,
-                'total_selling_price' => $totalSelling,
-                'bruto' => $brutoVal,
-            ]);
-
-            $rawItemsSellingSum = 0;
-            foreach ($validated['items'] as $it) {
-                $rawItemsSellingSum += (float)$it['selling_price'] * (int)$it['qty'];
-            }
-            $scaleRatio = ($rawItemsSellingSum > 0 && abs($rawItemsSellingSum - $totalSelling) > 0.01)
-                ? ($totalSelling / $rawItemsSellingSum)
-                : 1.0;
-
-            foreach ($validated['items'] as $itemData) {
-                $adjustedSellingPrice = round((float)$itemData['selling_price'] * $scaleRatio, 2);
-                StockOutItem::create([
-                    'stock_out_id' => $stockOut->id,
-                    'product_variant_id' => $itemData['product_variant_id'],
-                    'konveksi_id' => $itemData['konveksi_id'] ?? null,
-                    'qty' => $itemData['qty'],
-                    'price' => $itemData['price'],
-                    'subtotal' => $itemData['price'] * $itemData['qty'],
-                    'selling_price' => $adjustedSellingPrice,
-                ]);
-
-                $variant = ProductVariant::with('product')->find($itemData['product_variant_id']);
-
-                $logNote = $this->formatStockLogNote($stockOut, "Penjualan Resi");
-                $bundleLogNote = $this->formatStockLogNote($stockOut, "Penjualan Bundle");
-
-                if ($variant && $variant->product && $variant->product->product_type === 'bundle') {
-                    $bundleItems = BundleItem::where('bundle_variant_id', $variant->id)->get();
-                    foreach ($bundleItems as $bItem) {
-                        $deductQty = ($bItem->qty ?? $bItem->quantity ?? 1) * $itemData['qty'];
-                        $this->deductPhysicalStock($validated['warehouse_id'], $bItem->component_variant_id, $deductQty, $stockOut->id, $bundleLogNote);
-                    }
-                } else {
-                    $this->deductPhysicalStock($validated['warehouse_id'], $itemData['product_variant_id'], $itemData['qty'], $stockOut->id, $logNote);
-                }
-            }
-        });
+                'bruto' => $validated['bruto'] ?? null,
+                'total_selling_price' => $request->filled('total_selling_price') ? (float) $request->input('total_selling_price') : null,
+            ],
+            items: $validated['items'],
+            userId: (int) $request->user()->id,
+        );
 
         return redirect()->route('superadmin.warehouse.stock-out.index')->with('success', 'Transaksi Stok Keluar berhasil disimpan.');
     }
@@ -358,120 +299,718 @@ class StockOutController extends Controller
             'bruto' => ['nullable', 'numeric'],
             'total_selling_price' => ['nullable', 'numeric'],
             'items' => ['required', 'array', 'min:1'],
-            'items.*.product_variant_id' => ['required', 'exists:product_variants,id'],
-            'items.*.konveksi_id' => ['nullable', 'exists:konveksis,id'],
+            'items.*.product_variant_id' => ['required', 'integer'],
+            'items.*.konveksi_id' => ['nullable', 'integer'],
             'items.*.qty' => ['required', 'integer', 'min:1'],
             'items.*.price' => ['required', 'numeric', 'min:0'],
             'items.*.selling_price' => ['required', 'numeric'],
         ]);
 
-        DB::transaction(function () use ($validated, $request, $stockOut) {
-            foreach ($stockOut->items as $item) {
-                $oldVariant = ProductVariant::with('product')->find($item->product_variant_id);
-                if ($oldVariant && $oldVariant->product && $oldVariant->product->product_type === 'bundle') {
-                    $bundleItems = BundleItem::where('bundle_variant_id', $oldVariant->id)->get();
-                    foreach ($bundleItems as $bItem) {
-                        $compQty = ($bItem->qty ?? $bItem->quantity ?? 1) * $item->qty;
-                        $stock = Stock::where('warehouse_id', $stockOut->warehouse_id)
-                            ->where('product_variant_id', $bItem->component_variant_id)
-                            ->first();
-                        if ($stock) {
-                            $stock->increment('qty', $compQty);
+        $this->validateBatchReferences($validated['items']);
+
+        $this->persistStockOutBulk(
+            header: [
+                'warehouse_id' => (int) $validated['warehouse_id'],
+                'store_id' => $validated['store_id'] ?? null,
+                'period_id' => $validated['period_id'] ?? null,
+                'resi_summary' => $validated['resi_summary'],
+                'date' => $validated['date'],
+                'note' => $validated['note'] ?? null,
+                'bruto' => $validated['bruto'] ?? null,
+                'total_selling_price' => $request->filled('total_selling_price') ? (float) $request->input('total_selling_price') : null,
+            ],
+            items: $validated['items'],
+            userId: (int) $request->user()->id,
+            existingStockOut: $stockOut,
+        );
+
+        return redirect()->route('superadmin.warehouse.stock-out.index')->with('success', 'Transaksi Stok Keluar berhasil diperbarui.');
+    }
+
+    public function initChunkedSave(Request $request)
+    {
+        $validated = $request->validate([
+            'stock_out_id' => ['nullable', 'integer', 'exists:stock_outs,id'],
+            'warehouse_id' => ['required', 'exists:warehouses,id'],
+            'store_id' => ['nullable', 'exists:stores,id'],
+            'period_id' => ['nullable', 'exists:periods,id'],
+            'date' => ['required', 'date'],
+            'note' => ['nullable', 'string'],
+            'bruto' => ['nullable', 'numeric'],
+            'total_selling_price' => ['nullable', 'numeric'],
+            'fallback_resi_summary' => ['nullable', 'string', 'max:1000'],
+        ]);
+
+        $this->cleanupStaleStagingDirs();
+
+        $token = (string) Str::uuid();
+        $dir = $this->getStagingDir($token);
+        File::ensureDirectoryExists($dir);
+
+        $meta = [
+            'user_id' => (int) $request->user()->id,
+            'stock_out_id' => isset($validated['stock_out_id']) ? (int) $validated['stock_out_id'] : null,
+            'warehouse_id' => (int) $validated['warehouse_id'],
+            'store_id' => $validated['store_id'] ?? null,
+            'period_id' => $validated['period_id'] ?? null,
+            'date' => $validated['date'],
+            'note' => $validated['note'] ?? null,
+            'bruto' => $validated['bruto'] ?? null,
+            'total_selling_price' => $request->filled('total_selling_price') ? (float) $request->input('total_selling_price') : null,
+            'fallback_resi_summary' => $validated['fallback_resi_summary'] ?? null,
+            'created_at' => now()->timestamp,
+        ];
+
+        File::put($dir . DIRECTORY_SEPARATOR . 'meta.json', json_encode($meta));
+
+        return response()->json([
+            'success' => true,
+            'token' => $token,
+        ]);
+    }
+
+    public function appendChunkedSave(Request $request)
+    {
+        $validated = $request->validate([
+            'token' => ['required', 'uuid'],
+            'type' => ['required', 'in:items,resis'],
+            'chunk' => ['required', 'array', 'min:1'],
+        ]);
+
+        $token = $validated['token'];
+        $dir = $this->getStagingDir($token);
+        $meta = $this->readStagingMeta($dir, (int) $request->user()->id);
+
+        if (!$meta) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Sesi penyimpanan tidak ditemukan atau sudah kedaluwarsa. Silakan ulangi simpan.',
+            ], 404);
+        }
+
+        $type = $validated['type'];
+        $filePath = $dir . DIRECTORY_SEPARATOR . ($type === 'items' ? 'items.jsonl' : 'resis.jsonl');
+
+        $lines = [];
+        foreach ($validated['chunk'] as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $lines[] = json_encode($row, JSON_UNESCAPED_UNICODE);
+        }
+
+        if (!empty($lines)) {
+            file_put_contents($filePath, implode("\n", $lines) . "\n", FILE_APPEND | LOCK_EX);
+        }
+
+        return response()->json([
+            'success' => true,
+            'received' => count($lines),
+        ]);
+    }
+
+    public function commitChunkedSave(Request $request)
+    {
+        $validated = $request->validate([
+            'token' => ['required', 'uuid'],
+        ]);
+
+        $token = $validated['token'];
+        $dir = $this->getStagingDir($token);
+        $meta = $this->readStagingMeta($dir, (int) $request->user()->id);
+
+        if (!$meta) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Sesi penyimpanan tidak ditemukan atau sudah kedaluwarsa. Silakan ulangi simpan.',
+            ], 404);
+        }
+
+        $items = $this->readJsonLines($dir . DIRECTORY_SEPARATOR . 'items.jsonl');
+        $resis = $this->readJsonLines($dir . DIRECTORY_SEPARATOR . 'resis.jsonl');
+
+        if (empty($items)) {
+            File::deleteDirectory($dir);
+            return response()->json([
+                'success' => false,
+                'message' => 'Daftar item barang keluar kosong.',
+            ], 422);
+        }
+
+        $normalizedItems = [];
+        foreach ($items as $idx => $item) {
+            $variantId = isset($item['product_variant_id']) ? (int) $item['product_variant_id'] : 0;
+            $qty = isset($item['qty']) ? (int) $item['qty'] : 0;
+            if ($variantId <= 0 || $qty < 1) {
+                File::deleteDirectory($dir);
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Data item ke-' . ($idx + 1) . ' tidak valid (varian/qty).',
+                ], 422);
+            }
+
+            $normalizedItems[] = [
+                'product_variant_id' => $variantId,
+                'konveksi_id' => !empty($item['konveksi_id']) ? (int) $item['konveksi_id'] : null,
+                'qty' => $qty,
+                'price' => max(0.0, (float) ($item['price'] ?? 0)),
+                'selling_price' => (float) ($item['selling_price'] ?? 0),
+            ];
+        }
+
+        try {
+            $this->validateBatchReferences($normalizedItems);
+        } catch (ValidationException $e) {
+            File::deleteDirectory($dir);
+            return response()->json([
+                'success' => false,
+                'message' => collect($e->errors())->flatten()->first() ?? 'Validasi referensi item gagal.',
+                'errors' => $e->errors(),
+            ], 422);
+        }
+
+        $resiSummary = !empty($resis)
+            ? json_encode($resis, JSON_UNESCAPED_UNICODE)
+            : (string) ($meta['fallback_resi_summary'] ?: ($meta['note'] ?: ('Manual Out ' . $meta['date'])));
+
+        $existingStockOut = null;
+        if (!empty($meta['stock_out_id'])) {
+            $existingStockOut = StockOut::with('items')->findOrFail((int) $meta['stock_out_id']);
+        }
+
+        $stockOut = $this->persistStockOutBulk(
+            header: [
+                'warehouse_id' => (int) $meta['warehouse_id'],
+                'store_id' => $meta['store_id'] ?? null,
+                'period_id' => $meta['period_id'] ?? null,
+                'resi_summary' => $resiSummary,
+                'date' => $meta['date'],
+                'note' => $meta['note'] ?? null,
+                'bruto' => $meta['bruto'] ?? null,
+                'total_selling_price' => $meta['total_selling_price'] ?? null,
+            ],
+            items: $normalizedItems,
+            userId: (int) $request->user()->id,
+            existingStockOut: $existingStockOut,
+            preParsedResis: !empty($resis) ? $resis : null,
+        );
+
+        File::deleteDirectory($dir);
+
+        $message = $existingStockOut
+            ? 'Transaksi Stok Keluar berhasil diperbarui.'
+            : 'Transaksi Stok Keluar berhasil disimpan.';
+
+        session()->flash('success', $message);
+
+        return response()->json([
+            'success' => true,
+            'message' => $message,
+            'stock_out_id' => $stockOut->id,
+            'redirect_url' => route('superadmin.warehouse.stock-out.index'),
+        ]);
+    }
+
+    public function abortChunkedSave(Request $request)
+    {
+        $validated = $request->validate([
+            'token' => ['required', 'uuid'],
+        ]);
+
+        $dir = $this->getStagingDir($validated['token']);
+        $meta = $this->readStagingMeta($dir, (int) $request->user()->id);
+
+        if ($meta) {
+            File::deleteDirectory($dir);
+        }
+
+        return response()->json(['success' => true]);
+    }
+
+    private function getStagingBaseDir(): string
+    {
+        return storage_path('app/private/stock-out-staging');
+    }
+
+    private function getStagingDir(string $token): string
+    {
+        return $this->getStagingBaseDir() . DIRECTORY_SEPARATOR . $token;
+    }
+
+    private function readStagingMeta(string $dir, int $userId): ?array
+    {
+        $metaPath = $dir . DIRECTORY_SEPARATOR . 'meta.json';
+        if (!File::exists($metaPath)) {
+            return null;
+        }
+        $meta = json_decode((string) File::get($metaPath), true);
+        if (!is_array($meta) || (int) ($meta['user_id'] ?? 0) !== $userId) {
+            return null;
+        }
+        return $meta;
+    }
+
+    private function readJsonLines(string $filePath): array
+    {
+        if (!File::exists($filePath)) {
+            return [];
+        }
+
+        $rows = [];
+        $handle = fopen($filePath, 'r');
+        if (!$handle) {
+            return [];
+        }
+
+        while (($line = fgets($handle)) !== false) {
+            $line = trim($line);
+            if ($line === '') {
+                continue;
+            }
+            $decoded = json_decode($line, true);
+            if (is_array($decoded)) {
+                $rows[] = $decoded;
+            }
+        }
+        fclose($handle);
+
+        return $rows;
+    }
+
+    private function cleanupStaleStagingDirs(): void
+    {
+        $baseDir = $this->getStagingBaseDir();
+        if (!File::isDirectory($baseDir)) {
+            return;
+        }
+
+        $cutoff = now()->subHours(2)->timestamp;
+        foreach (File::directories($baseDir) as $dir) {
+            $metaPath = $dir . DIRECTORY_SEPARATOR . 'meta.json';
+            $mtime = File::exists($metaPath) ? File::lastModified($metaPath) : File::lastModified($dir);
+            if ($mtime < $cutoff) {
+                File::deleteDirectory($dir);
+            }
+        }
+    }
+
+    /** @var array<string, array<string, int>> */
+    private static array $tableColumnsCache = [];
+
+    private function getTableColumns(string $table): array
+    {
+        $conn = DB::getDefaultConnection();
+        $cacheKey = $conn . ':' . $table;
+        if (!isset(self::$tableColumnsCache[$cacheKey])) {
+            self::$tableColumnsCache[$cacheKey] = array_flip(Schema::getColumnListing($table));
+        }
+        return self::$tableColumnsCache[$cacheKey];
+    }
+
+    private function getStockLogColumns(): array
+    {
+        return $this->getTableColumns('stock_logs');
+    }
+
+    private function stocksHasAllocatedQty(): bool
+    {
+        return isset($this->getTableColumns('stocks')['allocated_qty']);
+    }
+
+    private function validateBatchReferences(array $items): void
+    {
+        $variantIds = array_values(array_unique(array_map(fn ($i) => (int) $i['product_variant_id'], $items)));
+        $existingVariantCount = ProductVariant::whereIn('id', $variantIds)->count();
+        if ($existingVariantCount !== count($variantIds)) {
+            throw ValidationException::withMessages([
+                'items' => ['Terdapat varian produk yang tidak ditemukan di database.'],
+            ]);
+        }
+
+        $konveksiIds = array_values(array_unique(array_filter(array_map(
+            fn ($i) => !empty($i['konveksi_id']) ? (int) $i['konveksi_id'] : null,
+            $items
+        ))));
+        if (!empty($konveksiIds)) {
+            $existingKonveksiCount = Konveksi::whereIn('id', $konveksiIds)->count();
+            if ($existingKonveksiCount !== count($konveksiIds)) {
+                throw ValidationException::withMessages([
+                    'items' => ['Terdapat data konveksi yang tidak ditemukan di database.'],
+                ]);
+            }
+        }
+    }
+
+    private function bulkAdjustStockColumn(int $warehouseId, array $deltaByVariantId): void
+    {
+        if (empty($deltaByVariantId)) {
+            return;
+        }
+
+        $now = now()->toDateTimeString();
+
+        foreach (array_chunk($deltaByVariantId, 200, true) as $chunk) {
+            $cases = [];
+            $bindings = [];
+            $variantIds = [];
+
+            foreach ($chunk as $variantId => $delta) {
+                $deltaInt = (int) $delta;
+                if ($deltaInt === 0) {
+                    continue;
+                }
+                $cases[] = 'WHEN ? THEN ?';
+                $bindings[] = (int) $variantId;
+                $bindings[] = $deltaInt;
+                $variantIds[] = (int) $variantId;
+            }
+
+            if (empty($variantIds)) {
+                continue;
+            }
+
+            $bindings[] = $now;
+            $bindings[] = $warehouseId;
+            $placeholders = implode(',', array_fill(0, count($variantIds), '?'));
+            foreach ($variantIds as $vId) {
+                $bindings[] = $vId;
+            }
+
+            $sql = 'UPDATE stocks SET qty = qty + CASE product_variant_id '
+                . implode(' ', $cases)
+                . " ELSE 0 END, updated_at = ? WHERE warehouse_id = ? AND product_variant_id IN ({$placeholders})";
+
+            DB::update($sql, $bindings);
+        }
+    }
+
+    private function persistStockOutBulk(
+        array $header,
+        array $items,
+        int $userId,
+        ?StockOut $existingStockOut = null,
+        ?array $preParsedResis = null
+    ): StockOut {
+        return DB::transaction(function () use ($header, $items, $userId, $existingStockOut, $preParsedResis) {
+            $now = now();
+            $nowStr = $now->toDateTimeString();
+
+            // 1. If updating an existing StockOut, restore old physical stocks in bulk
+            if ($existingStockOut) {
+                $oldItems = $existingStockOut->items;
+                if ($oldItems->isNotEmpty()) {
+                    $oldVariantIds = $oldItems->pluck('product_variant_id')->filter()->unique()->values()->all();
+                    $oldVariants = ProductVariant::with('product:id,product_type')
+                        ->whereIn('id', $oldVariantIds)
+                        ->get()
+                        ->keyBy('id');
+
+                    $oldBundleIds = $oldVariants
+                        ->filter(fn ($v) => $v->product && $v->product->product_type === 'bundle')
+                        ->keys()
+                        ->all();
+
+                    $oldBundleMap = !empty($oldBundleIds)
+                        ? BundleItem::whereIn('bundle_variant_id', $oldBundleIds)->get()->groupBy('bundle_variant_id')
+                        : collect();
+
+                    $restoreDeltas = [];
+                    foreach ($oldItems as $oldItem) {
+                        $oldVar = $oldVariants->get($oldItem->product_variant_id);
+                        if ($oldVar && $oldVar->product && $oldVar->product->product_type === 'bundle') {
+                            foreach ($oldBundleMap->get($oldVar->id, []) as $bItem) {
+                                $compId = (int) $bItem->component_variant_id;
+                                $compQty = (int) ($bItem->qty ?? $bItem->quantity ?? 1) * (int) $oldItem->qty;
+                                $restoreDeltas[$compId] = ($restoreDeltas[$compId] ?? 0) + $compQty;
+                            }
+                        } else {
+                            $vId = (int) $oldItem->product_variant_id;
+                            $restoreDeltas[$vId] = ($restoreDeltas[$vId] ?? 0) + (int) $oldItem->qty;
                         }
                     }
-                } else {
-                    $stock = Stock::where('warehouse_id', $stockOut->warehouse_id)
-                        ->where('product_variant_id', $item->product_variant_id)
-                        ->first();
 
-                    if ($stock) {
-                        $stock->increment('qty', $item->qty);
-                    }
+                    $this->bulkAdjustStockColumn((int) $existingStockOut->warehouse_id, $restoreDeltas);
                 }
+
+                $existingStockOut->items()->delete();
             }
 
-            $stockOut->items()->delete();
-
-            $totalHpp = 0;
-            $totalSelling = 0;
-            foreach ($validated['items'] as $item) {
-                $totalHpp += $item['price'] * $item['qty'];
-                $totalSelling += $item['selling_price'] * $item['qty'];
+            // 2. Compute totals once
+            $totalHpp = 0.0;
+            $rawItemsSellingSum = 0.0;
+            foreach ($items as $item) {
+                $totalHpp += (float) $item['price'] * (int) $item['qty'];
+                $rawItemsSellingSum += (float) $item['selling_price'] * (int) $item['qty'];
             }
+            $totalSelling = $rawItemsSellingSum;
 
-            // Check if resi_summary contains payments or total_selling_price provided
-            $parsedResis = json_decode($validated['resi_summary'], true);
+            $parsedResis = $preParsedResis ?? json_decode((string) $header['resi_summary'], true);
             $hasResiPayments = false;
-            $resiPaymentSum = 0;
+            $resiPaymentSum = 0.0;
             if (is_array($parsedResis)) {
                 foreach ($parsedResis as $r) {
-                    if (isset($r['payment']) && is_numeric($r['payment'])) {
+                    if (is_array($r) && isset($r['payment']) && is_numeric($r['payment'])) {
                         $hasResiPayments = true;
-                        $resiPaymentSum += (float)$r['payment'];
+                        $resiPaymentSum += (float) $r['payment'];
                     }
                 }
             }
 
             if ($hasResiPayments) {
                 $totalSelling = $resiPaymentSum;
-            } elseif ($request->filled('total_selling_price')) {
-                $totalSelling = (float)$request->input('total_selling_price');
+            } elseif ($header['total_selling_price'] !== null) {
+                $totalSelling = (float) $header['total_selling_price'];
             }
 
-            $brutoVal = floatval($validated['bruto'] ?? $totalSelling);
-            if ($brutoVal <= 0) $brutoVal = $totalSelling;
+            $brutoVal = (float) ($header['bruto'] ?? $totalSelling);
+            if ($brutoVal <= 0) {
+                $brutoVal = $totalSelling;
+            }
 
-            $stockOut->update([
-                'warehouse_id' => $validated['warehouse_id'],
-                'user_id' => $request->user()->id,
-                'store_id' => $validated['store_id'] ?? null,
-                'period_id' => $validated['period_id'] ?? null,
-                'resi_summary' => $validated['resi_summary'],
-                'date' => $validated['date'],
-                'note' => $validated['note'] ?? null,
-                'total_amount' => $totalHpp,
+            $stockOutColumns = $this->getTableColumns('stock_outs');
+            $stockOutPayload = [
+                'warehouse_id' => (int) $header['warehouse_id'],
+                'user_id' => $userId,
+                'store_id' => $header['store_id'] ?? null,
+                'period_id' => $header['period_id'] ?? null,
+                'resi_summary' => $header['resi_summary'],
+                'date' => $header['date'],
+                'note' => $header['note'] ?? null,
                 'total_selling_price' => $totalSelling,
                 'bruto' => $brutoVal,
-            ]);
-
-            $rawItemsSellingSum = 0;
-            foreach ($validated['items'] as $it) {
-                $rawItemsSellingSum += (float)$it['selling_price'] * (int)$it['qty'];
+            ];
+            if (isset($stockOutColumns['total_amount'])) {
+                $stockOutPayload['total_amount'] = $totalHpp;
             }
+
+            if ($existingStockOut) {
+                $existingStockOut->update($stockOutPayload);
+                $stockOut = $existingStockOut;
+            } else {
+                $stockOut = StockOut::create($stockOutPayload);
+            }
+
             $scaleRatio = ($rawItemsSellingSum > 0 && abs($rawItemsSellingSum - $totalSelling) > 0.01)
                 ? ($totalSelling / $rawItemsSellingSum)
                 : 1.0;
 
-            foreach ($validated['items'] as $itemData) {
-                $adjustedSellingPrice = round((float)$itemData['selling_price'] * $scaleRatio, 2);
-                StockOutItem::create([
+            // 3. Preload all variants & bundle components in 2 queries total
+            $variantIds = array_values(array_unique(array_map(fn ($i) => (int) $i['product_variant_id'], $items)));
+            $variants = ProductVariant::with('product:id,product_type')
+                ->whereIn('id', $variantIds)
+                ->select('id', 'product_id')
+                ->get()
+                ->keyBy('id');
+
+            $bundleVariantIds = $variants
+                ->filter(fn ($v) => $v->product && $v->product->product_type === 'bundle')
+                ->keys()
+                ->all();
+
+            $bundleMap = !empty($bundleVariantIds)
+                ? BundleItem::whereIn('bundle_variant_id', $bundleVariantIds)->get()->groupBy('bundle_variant_id')
+                : collect();
+
+            // 4. Compute StockLog notes ONCE (no repeated json_decode in loop!)
+            $notePrefix = $existingStockOut ? 'Update Stock Out Resi' : 'Penjualan Resi';
+            $bundleNotePrefix = $existingStockOut ? 'Update Stock Out Bundle' : 'Penjualan Bundle';
+            $logNote = Str::limit($this->formatStockLogNoteFromParsed($stockOut, $parsedResis, $notePrefix), 190);
+            $bundleLogNote = Str::limit($this->formatStockLogNoteFromParsed($stockOut, $parsedResis, $bundleNotePrefix), 190);
+
+            // 5. Build StockOutItem rows & physical deduction entries in memory
+            $stockOutItemColumns = $this->getTableColumns('stock_out_items');
+            $hasItemSubtotalCol = isset($stockOutItemColumns['subtotal']);
+            $stockOutItemRows = [];
+            $deductionEntries = [];
+            $physicalVariantIdsMap = [];
+
+            foreach ($items as $itemData) {
+                $vId = (int) $itemData['product_variant_id'];
+                $qty = (int) $itemData['qty'];
+                $price = (float) $itemData['price'];
+                $adjustedSellingPrice = round((float) $itemData['selling_price'] * $scaleRatio, 2);
+
+                $itemRow = [
                     'stock_out_id' => $stockOut->id,
-                    'product_variant_id' => $itemData['product_variant_id'],
+                    'product_variant_id' => $vId,
                     'konveksi_id' => $itemData['konveksi_id'] ?? null,
-                    'qty' => $itemData['qty'],
-                    'price' => $itemData['price'],
-                    'subtotal' => $itemData['price'] * $itemData['qty'],
+                    'qty' => $qty,
+                    'price' => $price,
                     'selling_price' => $adjustedSellingPrice,
-                ]);
+                    'created_at' => $nowStr,
+                    'updated_at' => $nowStr,
+                ];
+                if ($hasItemSubtotalCol) {
+                    $itemRow['subtotal'] = $price * $qty;
+                }
+                $stockOutItemRows[] = $itemRow;
 
-                $variant = ProductVariant::with('product')->find($itemData['product_variant_id']);
-
-                $logNote = $this->formatStockLogNote($stockOut, "Update Stock Out Resi");
-                $bundleLogNote = $this->formatStockLogNote($stockOut, "Update Stock Out Bundle");
-
+                $variant = $variants->get($vId);
                 if ($variant && $variant->product && $variant->product->product_type === 'bundle') {
-                    $bundleItems = BundleItem::where('bundle_variant_id', $variant->id)->get();
-                    foreach ($bundleItems as $bItem) {
-                        $deductQty = ($bItem->qty ?? $bItem->quantity ?? 1) * $itemData['qty'];
-                        $this->deductPhysicalStock($validated['warehouse_id'], $bItem->component_variant_id, $deductQty, $stockOut->id, $bundleLogNote);
+                    foreach ($bundleMap->get($variant->id, []) as $bItem) {
+                        $compId = (int) $bItem->component_variant_id;
+                        $deductQty = (int) ($bItem->qty ?? $bItem->quantity ?? 1) * $qty;
+                        $deductionEntries[] = [
+                            'variant_id' => $compId,
+                            'qty' => $deductQty,
+                            'note' => $bundleLogNote,
+                        ];
+                        $physicalVariantIdsMap[$compId] = true;
                     }
                 } else {
-                    $this->deductPhysicalStock($validated['warehouse_id'], $itemData['product_variant_id'], $itemData['qty'], $stockOut->id, $logNote);
+                    $deductionEntries[] = [
+                        'variant_id' => $vId,
+                        'qty' => $qty,
+                        'note' => $logNote,
+                    ];
+                    $physicalVariantIdsMap[$vId] = true;
                 }
             }
-        });
 
-        return redirect()->route('superadmin.warehouse.stock-out.index')->with('success', 'Transaksi Stok Keluar berhasil diperbarui.');
+            // Bulk insert StockOutItem in chunks
+            foreach (array_chunk($stockOutItemRows, 300) as $chunk) {
+                StockOutItem::insert($chunk);
+            }
+
+            // 6. Bulk preload / create missing Stock rows, then bulk update & bulk insert StockLog
+            $warehouseId = (int) $header['warehouse_id'];
+            $physicalVariantIds = array_keys($physicalVariantIdsMap);
+
+            if (!empty($physicalVariantIds)) {
+                $existingStocks = Stock::where('warehouse_id', $warehouseId)
+                    ->whereIn('product_variant_id', $physicalVariantIds)
+                    ->lockForUpdate()
+                    ->get()
+                    ->keyBy('product_variant_id');
+
+                $missingStockRows = [];
+                $hasAllocatedQty = $this->stocksHasAllocatedQty();
+                foreach ($physicalVariantIds as $pvId) {
+                    if (!$existingStocks->has($pvId)) {
+                        $row = [
+                            'warehouse_id' => $warehouseId,
+                            'product_variant_id' => $pvId,
+                            'qty' => 0,
+                            'created_at' => $nowStr,
+                            'updated_at' => $nowStr,
+                        ];
+                        if ($hasAllocatedQty) {
+                            $row['allocated_qty'] = 0;
+                        }
+                        $missingStockRows[] = $row;
+                    }
+                }
+
+                if (!empty($missingStockRows)) {
+                    foreach (array_chunk($missingStockRows, 300) as $chunk) {
+                        Stock::insert($chunk);
+                    }
+                    $existingStocks = Stock::where('warehouse_id', $warehouseId)
+                        ->whereIn('product_variant_id', $physicalVariantIds)
+                        ->lockForUpdate()
+                        ->get()
+                        ->keyBy('product_variant_id');
+                }
+
+                $runningQty = [];
+                $stockIdMap = [];
+                foreach ($existingStocks as $pvId => $stk) {
+                    $runningQty[(int) $pvId] = (int) $stk->qty;
+                    $stockIdMap[(int) $pvId] = (int) $stk->id;
+                }
+
+                $logColumns = $this->getStockLogColumns();
+                $deductDeltas = [];
+                $stockLogRows = [];
+
+                foreach ($deductionEntries as $entry) {
+                    $pvId = (int) $entry['variant_id'];
+                    $deductQty = (int) $entry['qty'];
+                    $qtyBefore = $runningQty[$pvId] ?? 0;
+                    $qtyAfter = $qtyBefore - $deductQty;
+                    $runningQty[$pvId] = $qtyAfter;
+                    $deductDeltas[$pvId] = ($deductDeltas[$pvId] ?? 0) - $deductQty;
+
+                    $logRow = [
+                        'reference_type' => StockOut::class,
+                        'reference_id' => $stockOut->id,
+                        'note' => $entry['note'],
+                        'created_at' => $nowStr,
+                        'updated_at' => $nowStr,
+                    ];
+
+                    if (isset($logColumns['stock_id'])) {
+                        $logRow['stock_id'] = $stockIdMap[$pvId] ?? null;
+                    }
+                    if (isset($logColumns['product_variant_id'])) {
+                        $logRow['product_variant_id'] = $pvId;
+                    }
+                    if (isset($logColumns['warehouse_id'])) {
+                        $logRow['warehouse_id'] = $warehouseId;
+                    }
+                    if (isset($logColumns['user_id'])) {
+                        $logRow['user_id'] = $userId;
+                    }
+                    if (isset($logColumns['type'])) {
+                        $logRow['type'] = 'STOCK_OUT';
+                    }
+                    if (isset($logColumns['qty_before'])) {
+                        $logRow['qty_before'] = $qtyBefore;
+                    }
+                    if (isset($logColumns['qty_change'])) {
+                        $logRow['qty_change'] = -$deductQty;
+                    }
+                    if (isset($logColumns['qty_after'])) {
+                        $logRow['qty_after'] = $qtyAfter;
+                    }
+                    if (isset($logColumns['quantity_before'])) {
+                        $logRow['quantity_before'] = $qtyBefore;
+                    }
+                    if (isset($logColumns['quantity_after'])) {
+                        $logRow['quantity_after'] = $qtyAfter;
+                    }
+                    if (isset($logColumns['change_amount'])) {
+                        $logRow['change_amount'] = -$deductQty;
+                    }
+
+                    $stockLogRows[] = $logRow;
+                }
+
+                $this->bulkAdjustStockColumn($warehouseId, $deductDeltas);
+
+                try {
+                    foreach (array_chunk($stockLogRows, 300) as $chunk) {
+                        StockLog::insert($chunk);
+                    }
+                } catch (\Throwable $e) {
+                    \Log::warning('Gagal mencatat bulk StockLog: ' . $e->getMessage());
+                }
+            }
+
+            return $stockOut;
+        });
+    }
+
+    private function formatStockLogNoteFromParsed(StockOut $stockOut, mixed $parsedResis, string $prefix = 'Penjualan Resi'): string
+    {
+        if (is_array($parsedResis)) {
+            $count = count($parsedResis);
+            $first = $parsedResis[0] ?? [];
+            $firstCode = is_array($first) ? ($first['no_resi'] ?? $first['order_id'] ?? null) : null;
+            if ($firstCode && $count > 1) {
+                return Str::limit("{$prefix} #{$firstCode} (+ " . ($count - 1) . " resi) [ID #{$stockOut->id}]", 190);
+            } elseif ($firstCode) {
+                return Str::limit("{$prefix} #{$firstCode} [ID #{$stockOut->id}]", 190);
+            }
+            return "{$prefix} [ID #{$stockOut->id}] ({$count} pesanan)";
+        }
+
+        $resiStr = trim((string) ($stockOut->resi_summary ?? ''));
+        if ($resiStr === '') {
+            return "{$prefix} [ID #{$stockOut->id}]";
+        }
+
+        return Str::limit("{$prefix} #{$resiStr} [ID #{$stockOut->id}]", 190);
     }
 
     public function processOrders(Request $request)

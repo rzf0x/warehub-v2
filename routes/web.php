@@ -102,6 +102,10 @@ Route::middleware(['auth'])->group(function () {
             Route::post('stock-out/quick-create-products', [StockOutController::class, 'quickCreateProducts'])->name('stock-out.quick-create-products');
             Route::post('stock-out/quick-adjust-stock', [StockOutController::class, 'quickAdjustStock'])->name('stock-out.quick-adjust-stock');
             Route::post('stock-out/quick-adjust-stock-bulk', [StockOutController::class, 'quickAdjustStockBulk'])->name('stock-out.quick-adjust-stock-bulk');
+            Route::post('stock-out/save-init', [StockOutController::class, 'initChunkedSave'])->name('stock-out.save-init');
+            Route::post('stock-out/save-chunk', [StockOutController::class, 'appendChunkedSave'])->name('stock-out.save-chunk');
+            Route::post('stock-out/save-commit', [StockOutController::class, 'commitChunkedSave'])->name('stock-out.save-commit');
+            Route::post('stock-out/save-abort', [StockOutController::class, 'abortChunkedSave'])->name('stock-out.save-abort');
             Route::resource('stock-out', StockOutController::class)->except(['show']);
 
             // Stock Opname

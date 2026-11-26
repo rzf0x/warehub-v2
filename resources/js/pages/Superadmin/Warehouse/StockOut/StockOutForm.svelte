@@ -1800,10 +1800,66 @@
         return Object.values(groups);
     });
 
-    // Form Submission
+    // Form Submission (Staged Chunked Save — Atomic & Anti-503 cPanel)
     let isSubmitting = $state(false);
+    let saveProgress = $state<number>(0);
+    let saveStatusText = $state<string>("");
+    let saveStepLabel = $state<string>("");
+    let saveSentItems = $state<number>(0);
+    let saveSentResis = $state<number>(0);
 
-    function submitForm() {
+    async function postJsonSafe(url: string, body: Record<string, any>) {
+        const response = await fetch(url, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                Accept: "application/json",
+                "X-Requested-With": "XMLHttpRequest",
+                "X-CSRF-TOKEN": getCsrfHeader(),
+            },
+            body: JSON.stringify(body),
+        });
+
+        const resText = await response.text();
+        let resData: any;
+        try {
+            resData = JSON.parse(resText);
+        } catch {
+            if (response.status === 419) {
+                throw new Error(
+                    "Sesi browser kedaluwarsa (419). Silakan refresh halaman lalu coba simpan lagi.",
+                );
+            }
+            if (response.status === 403) {
+                throw new Error(
+                    "Akses ditolak (HTTP 403). Firewall server memblokir request.",
+                );
+            }
+            if (response.status === 503 || response.status === 504) {
+                throw new Error(
+                    `Server sedang padat/sibuk (HTTP ${response.status}). Data database tetap aman (tidak ada data setengah tersimpan). Silakan coba klik Simpan lagi.`,
+                );
+            }
+            throw new Error(`Server mengembalikan status HTTP ${response.status}`);
+        }
+
+        if (!response.ok || resData.success === false) {
+            const firstErr = resData?.errors
+                ? Object.values(resData.errors).flat()[0]
+                : null;
+            throw new Error(
+                String(
+                    firstErr ||
+                        resData?.message ||
+                        `Gagal memproses request (HTTP ${response.status})`,
+                ),
+            );
+        }
+
+        return resData;
+    }
+
+    async function submitForm() {
         if (!warehouseId) {
             alert("Pilih Gudang Asal terlebih dahulu!");
             return;
@@ -1826,53 +1882,150 @@
         }
 
         isSubmitting = true;
+        saveProgress = 5;
+        saveSentItems = 0;
+        saveSentResis = 0;
+        saveStepLabel = "Tahap 1/3 • Menyiapkan Sesi";
+        saveStatusText = "Menyiapkan sesi penyimpanan aman di server...";
 
-        const resiSummaryStr =
-            resiList.length > 0
-                ? JSON.stringify(
-                      resiList.map((r) => ({
-                          order_id: (r.order_id || "").trim(),
-                          no_resi: (r.no_resi || "").trim(),
-                          payment: Number(r.payment) || 0,
-                      })),
-                  )
-                : note ||
-                  `Manual Out ${new Date().toISOString().split("T")[0]}`;
+        let activeToken: string | null = null;
 
-        const payload = {
-            warehouse_id: warehouseId,
-            period_id: periodId || null,
-            store_id: storeId || null,
-            date: date,
-            note: note,
-            bruto: liveBruto,
-            total_selling_price: liveTotalSelling,
-            resi_summary: resiSummaryStr,
-            items: formItems.map((i) => ({
+        try {
+            const preparedItems = formItems.map((i) => ({
                 product_variant_id: i.product_variant_id,
                 konveksi_id: i.konveksi_id || null,
-                qty: i.qty,
-                price: i.price,
-                selling_price: i.selling_price,
-            })),
-        };
+                qty: Number(i.qty || 1),
+                price: Number(i.price || 0),
+                selling_price: Number(i.selling_price || 0),
+            }));
 
-        if (isEdit && stockOut) {
-            router.put(
-                `/superadmin/warehouse/stock-out/${stockOut.id}`,
-                payload,
+            const preparedResis = resiList.map((r) => ({
+                order_id: (r.order_id || "").trim(),
+                no_resi: (r.no_resi || "").trim(),
+                payment: Number(r.payment) || 0,
+            }));
+
+            const fallbackResiSummary =
+                note || `Manual Out ${new Date().toISOString().split("T")[0]}`;
+
+            // 1. Init staging session (tiny payload, 0 DB writes)
+            const initRes = await postJsonSafe(
+                "/superadmin/warehouse/stock-out/save-init",
+                {
+                    stock_out_id: isEdit && stockOut ? stockOut.id : null,
+                    warehouse_id: Number(warehouseId),
+                    period_id: periodId ? Number(periodId) : null,
+                    store_id: storeId ? Number(storeId) : null,
+                    date: date,
+                    note: note || null,
+                    bruto: liveBruto,
+                    total_selling_price: liveTotalSelling,
+                    fallback_resi_summary: fallbackResiSummary,
+                },
+            );
+
+            activeToken = initRes.token;
+            if (!activeToken) {
+                throw new Error("Token sesi penyimpanan tidak diterima.");
+            }
+
+            // 2. Send items & resis in small safe chunks
+            const ITEM_CHUNK_SIZE = 100;
+            const RESI_CHUNK_SIZE = 500;
+            const totalItemChunks = Math.ceil(
+                preparedItems.length / ITEM_CHUNK_SIZE,
+            );
+            const totalResiChunks = Math.ceil(
+                preparedResis.length / RESI_CHUNK_SIZE,
+            );
+            const totalChunks = Math.max(1, totalItemChunks + totalResiChunks);
+            let doneChunks = 0;
+
+            saveStepLabel = "Tahap 2/3 • Mengirim Data Bertahap";
+
+            for (let i = 0; i < preparedItems.length; i += ITEM_CHUNK_SIZE) {
+                const chunk = preparedItems.slice(i, i + ITEM_CHUNK_SIZE);
+                saveStatusText = `Mengirim batch item (${Math.min(i + chunk.length, preparedItems.length)} / ${preparedItems.length} item)...`;
+
+                await postJsonSafe(
+                    "/superadmin/warehouse/stock-out/save-chunk",
+                    {
+                        token: activeToken,
+                        type: "items",
+                        chunk,
+                    },
+                );
+
+                saveSentItems += chunk.length;
+                doneChunks++;
+                saveProgress = 10 + Math.round((doneChunks / totalChunks) * 70);
+            }
+
+            for (let i = 0; i < preparedResis.length; i += RESI_CHUNK_SIZE) {
+                const chunk = preparedResis.slice(i, i + RESI_CHUNK_SIZE);
+                saveStatusText = `Mengirim batch resi (${Math.min(i + chunk.length, preparedResis.length)} / ${preparedResis.length} resi)...`;
+
+                await postJsonSafe(
+                    "/superadmin/warehouse/stock-out/save-chunk",
+                    {
+                        token: activeToken,
+                        type: "resis",
+                        chunk,
+                    },
+                );
+
+                saveSentResis += chunk.length;
+                doneChunks++;
+                saveProgress = 10 + Math.round((doneChunks / totalChunks) * 70);
+            }
+
+            // 3. Atomic commit into database (single DB transaction)
+            saveProgress = 88;
+            saveStepLabel = "Tahap 3/3 • Finalisasi Database";
+            saveStatusText =
+                "Menyimpan transaksi & memotong stok secara atomik ke database...";
+
+            const commitRes = await postJsonSafe(
+                "/superadmin/warehouse/stock-out/save-commit",
+                { token: activeToken },
+            );
+
+            activeToken = null;
+            saveProgress = 100;
+            saveStatusText =
+                commitRes.message || "Berhasil disimpan! Mengalihkan halaman...";
+
+            router.visit(
+                commitRes.redirect_url || "/superadmin/warehouse/stock-out",
                 {
                     onFinish: () => {
                         isSubmitting = false;
                     },
                 },
             );
-        } else {
-            router.post("/superadmin/warehouse/stock-out", payload, {
-                onFinish: () => {
-                    isSubmitting = false;
-                },
-            });
+        } catch (err: any) {
+            console.error("Chunked save error:", err);
+
+            // Clean up staged temp files if aborted mid-way (DB remains 100% untouched)
+            if (activeToken) {
+                fetch("/superadmin/warehouse/stock-out/save-abort", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        Accept: "application/json",
+                        "X-Requested-With": "XMLHttpRequest",
+                        "X-CSRF-TOKEN": getCsrfHeader(),
+                    },
+                    body: JSON.stringify({ token: activeToken }),
+                }).catch(() => {});
+            }
+
+            isSubmitting = false;
+            alert(
+                "Gagal menyimpan transaksi: " +
+                    (err?.message || "Koneksi terputus") +
+                    "\n\nTenang, database tetap aman (tidak ada data setengah tersimpan). Silakan coba klik Simpan lagi.",
+            );
         }
     }
 
@@ -4739,6 +4892,113 @@
                     >
                         Mohon tunggu sebentar, jangan menutup atau memuat ulang
                         halaman...
+                    </p>
+                </div>
+            </div>
+        {/if}
+
+        <!-- Modal Progress: Staged Chunked Save (Atomic & Anti-503 cPanel) -->
+        {#if isSubmitting}
+            <div
+                class="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-sm flex items-center justify-center p-4"
+            >
+                <div
+                    class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-8 max-w-md w-full shadow-2xl text-center space-y-6"
+                >
+                    <div
+                        class="relative w-20 h-20 mx-auto flex items-center justify-center"
+                    >
+                        <div
+                            class="absolute inset-0 rounded-full bg-rose-500/20 animate-ping"
+                        ></div>
+                        <div
+                            class="w-16 h-16 rounded-2xl bg-gradient-to-tr from-rose-500 to-pink-500 p-0.5 flex items-center justify-center shadow-lg shadow-rose-500/30"
+                        >
+                            <div
+                                class="w-full h-full bg-white dark:bg-slate-900 rounded-[14px] flex items-center justify-center"
+                            >
+                                <RefreshCw
+                                    class="w-8 h-8 text-rose-500 animate-spin"
+                                />
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="space-y-1.5">
+                        <h3
+                            class="text-base font-extrabold text-slate-800 dark:text-slate-100"
+                        >
+                            {isEdit
+                                ? "Memperbarui Transaksi Stock Out..."
+                                : "Menyimpan Transaksi Stock Out..."}
+                        </h3>
+                        <p
+                            class="text-xs font-medium text-slate-500 dark:text-slate-400 leading-relaxed"
+                        >
+                            {saveStatusText ||
+                                "Mengirim data secara bertahap agar ringan di server..."}
+                        </p>
+                    </div>
+
+                    <div class="space-y-2">
+                        <div
+                            class="flex justify-between items-center text-xs font-bold"
+                        >
+                            <span class="text-slate-600 dark:text-slate-300">
+                                {saveStepLabel || "Menyiapkan penyimpanan..."}
+                            </span>
+                            <span
+                                class="text-rose-600 dark:text-rose-400 text-sm"
+                            >
+                                {saveProgress}%
+                            </span>
+                        </div>
+                        <div
+                            class="w-full bg-slate-100 dark:bg-slate-800 h-3 rounded-full overflow-hidden p-0.5 border border-slate-200/50 dark:border-slate-700/50"
+                        >
+                            <div
+                                class="bg-gradient-to-r from-rose-500 via-pink-500 to-emerald-500 h-full transition-all duration-300 rounded-full"
+                                style="width: {saveProgress}%"
+                            ></div>
+                        </div>
+                    </div>
+
+                    <div
+                        class="grid grid-cols-2 gap-2 pt-2 border-t border-slate-100 dark:border-slate-800 text-center"
+                    >
+                        <div
+                            class="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-slate-100 dark:border-slate-800/60"
+                        >
+                            <span
+                                class="text-[10px] font-bold text-slate-400 block uppercase"
+                                >Item Terkirim</span
+                            >
+                            <span
+                                class="text-xs font-extrabold text-slate-700 dark:text-slate-200 font-mono"
+                            >
+                                {saveSentItems} / {formItems.length}
+                            </span>
+                        </div>
+                        <div
+                            class="p-2.5 rounded-xl bg-cyan-50 dark:bg-cyan-950/30 border border-cyan-100 dark:border-cyan-900/40"
+                        >
+                            <span
+                                class="text-[10px] font-bold text-cyan-600 dark:text-cyan-400 block uppercase"
+                                >Resi Terkirim</span
+                            >
+                            <span
+                                class="text-xs font-extrabold text-cyan-700 dark:text-cyan-300 font-mono"
+                            >
+                                {saveSentResis} / {resiList.length}
+                            </span>
+                        </div>
+                    </div>
+
+                    <p
+                        class="text-[11px] text-slate-400 dark:text-slate-500 italic"
+                    >
+                        Data disimpan secara atomik. Jika koneksi terputus
+                        sebelum tahap akhir, database tetap aman.
                     </p>
                 </div>
             </div>
